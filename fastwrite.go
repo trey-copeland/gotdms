@@ -23,6 +23,104 @@ func growExact(dst []byte, n int) []byte {
 	return out
 }
 
+// borrowedView is the little-endian byte view of a fixed numeric or complex
+// slice. handled is true when Write should retain that view instead of
+// copying. Empty slices are handled and contribute no bytes. A big-endian
+// host returns handled false for widths above one byte so appendEncoded can
+// byte-swap. Bool, timestamp, extended, and string values are not views.
+func borrowedView(dt DataType, values any) (b []byte, n int, handled bool) {
+	if values == nil {
+		return nil, 0, true
+	}
+	switch dt.storage() {
+	case TypeInt8:
+		s, ok := values.([]int8)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeUint8:
+		s, ok := values.([]uint8)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeInt16:
+		s, ok := values.([]int16)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeUint16:
+		s, ok := values.([]uint16)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeInt32:
+		s, ok := values.([]int32)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeUint32:
+		s, ok := values.([]uint32)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeFloat32:
+		s, ok := values.([]float32)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeInt64:
+		s, ok := values.([]int64)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeUint64:
+		s, ok := values.([]uint64)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeFloat64:
+		s, ok := values.([]float64)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeComplex64:
+		s, ok := values.([]complex64)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	case TypeComplex128:
+		s, ok := values.([]complex128)
+		if !ok {
+			return nil, 0, false
+		}
+		return aliasSlice(s)
+	default:
+		return nil, 0, false
+	}
+}
+
+func aliasSlice[T fixedNative](s []T) ([]byte, int, bool) {
+	if len(s) == 0 {
+		return nil, 0, true
+	}
+	sz := int(unsafe.Sizeof(s[0]))
+	if sz != 1 && !nativeLittleEndian {
+		return nil, 0, false
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&s[0])), len(s)*sz), len(s), true
+}
+
 // appendEncoded appends the on-disk form of values to dst. String channels
 // return the strings separately; their offset table is streamed at flush.
 func appendEncoded(dst []byte, dt DataType, values any) ([]byte, []string, int, error) {

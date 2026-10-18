@@ -7,8 +7,17 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
+	"sync/atomic"
 	"time"
 )
+
+// metaBuilds counts metadata encodings. A repeat Flush of an unchanged
+// channel shape reuses the previous encoding and does not increment this.
+var metaBuilds atomic.Int64
+
+// metaReuse gates that cache. Benchmarks turn it off to measure the rebuild.
+var metaReuse = true
 
 // Writer appends TDMS segments to an io.Writer.
 //
@@ -24,12 +33,20 @@ import (
 // A writer that cannot seek writes the lead-in with the finished length, then
 // the bytes, because the length is known before the raw section is streamed.
 //
-// Samples passed to Write are encoded into the channel buffer and held until
-// Flush. Flush streams that buffer through a large bufio.Writer (see
+// On a little-endian host, Write retains a fixed-size numeric or complex
+// slice until Flush or Close instead of copying it. Do not mutate that slice
+// until Flush or Close returns; after that the writer no longer aliases it.
+// A later Write on the same channel copies any slice still retained. Bool,
+// timestamp, and extended values are encoded into the channel buffer at
+// Write. String headers are copied; string bytes are immutable. A big-endian
+// host copies numeric slices at Write so they can be stored little-endian.
+//
+// Flush streams the channel buffer through a large bufio.Writer (see
 // WithWriteBuffer). It does not allocate a second copy of a contiguous
-// segment. Interleaved output is mixed in windows of about 1 MiB. Flush
-// often when a single chunk would be larger than memory: the channel buffer
-// itself is still one copy of the encoded samples.
+// segment. Interleaved output is mixed in windows of about 1 MiB. The
+// samples for a segment stay reachable until Flush returns. Streaming a
+// segment to disk while Write is still being called would need a different
+// API; call Flush per segment instead of buffering the whole file.
 //
 // Segments are little-endian version 4713. SetInterleaved selects the layout
 // of later flushes. The writer is not safe for concurrent use.
@@ -46,6 +63,13 @@ type Writer struct {
 	interleaved bool
 	closed      bool
 	started     bool
+
+	metaValid bool
+	metaIn    metaInput
+	metaOut   []byte
+	metaToc   uint32
+	metaOrder []string
+	metaIdx   map[string]wIndex
 
 	root      *wObj
 	groups    []*wGroup
@@ -65,6 +89,7 @@ type wObj struct {
 	props   []Property
 	dirty   bool
 	emitted bool
+	rev     uint64
 }
 
 type wGroup struct {
@@ -75,14 +100,15 @@ type wGroup struct {
 }
 
 type wChannel struct {
-	group string
-	name  string
-	path  string
-	dt    DataType
-	obj   *wObj
-	raw   []byte
-	strs  []string
-	n     int
+	group   string
+	name    string
+	path    string
+	dt      DataType
+	obj     *wObj
+	raw     []byte
+	aliased bool // raw aliases a caller slice; do not reslice it
+	strs    []string
+	n       int
 }
 
 // GroupWriter is the write handle for one group.
@@ -245,18 +271,59 @@ func (c *ChannelWriter) SetProperty(name string, value any) error {
 // []string, []Timestamp or []time.Time, []Extended, []complex64, []complex128.
 // Float-with-unit channels take the same slices as the underlying float.
 // Repeated calls before Flush belong to one chunk.
+//
+// On a little-endian host, a fixed-size numeric or complex slice is retained
+// until Flush or Close, not copied. Mutating it before then changes the
+// segment. Bool, timestamp, and extended values are copied at Write. String
+// headers are copied. A big-endian host copies numeric slices at Write.
 func (c *ChannelWriter) Write(values any) error {
 	if c.w.closed {
 		return wrap("write", c.ch.path, ErrClosed)
+	}
+	if view, n, ok := borrowedView(c.ch.dt, values); ok {
+		c.ch.retainView(view, n)
+		return nil
+	}
+	if c.ch.aliased {
+		owned := append([]byte(nil), c.ch.raw...)
+		c.ch.raw = owned
+		c.ch.aliased = false
 	}
 	raw, strs, n, err := appendEncoded(c.ch.raw, c.ch.dt, values)
 	if err != nil {
 		return wrap("write", c.ch.path, err)
 	}
 	c.ch.raw = raw
+	c.ch.aliased = false
 	c.ch.strs = append(c.ch.strs, strs...)
 	c.ch.n += n
 	return nil
+}
+
+// retainView keeps view as the channel's raw bytes. The first slice aliases
+// the caller. A second slice is copied into an owned buffer so the previous
+// view can be appended to.
+func (ch *wChannel) retainView(view []byte, n int) {
+	if n == 0 {
+		return
+	}
+	if len(ch.raw) == 0 {
+		ch.raw = view
+		ch.aliased = true
+		ch.n += n
+		return
+	}
+	if ch.aliased {
+		owned := make([]byte, len(ch.raw)+len(view))
+		copy(owned, ch.raw)
+		copy(owned[len(ch.raw):], view)
+		ch.raw = owned
+		ch.aliased = false
+		ch.n += n
+		return
+	}
+	ch.raw = append(ch.raw, view...)
+	ch.n += n
 }
 
 // Flush writes the current segment. It is a no-op when nothing has changed
@@ -430,6 +497,28 @@ func (w *Writer) pendingMeta() bool {
 }
 
 func (w *Writer) buildMeta(data []*wChannel, hasRaw bool) ([]byte, uint32, []string, map[string]wIndex, error) {
+	if metaReuse && w.metaMatch(data, hasRaw) {
+		return w.metaOut, w.metaToc, w.metaOrder, w.metaIdx, nil
+	}
+	snap, err := w.snapshotMeta(data, hasRaw)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	meta, toc, order, indexes, err := w.buildMetaBody(data, hasRaw)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	w.metaValid = true
+	w.metaIn = snap
+	w.metaOut = meta
+	w.metaToc = toc
+	w.metaOrder = order
+	w.metaIdx = indexes
+	return meta, toc, order, indexes, nil
+}
+
+func (w *Writer) buildMetaBody(data []*wChannel, hasRaw bool) ([]byte, uint32, []string, map[string]wIndex, error) {
+	metaBuilds.Add(1)
 	order := make([]string, len(data))
 	for i, ch := range data {
 		order[i] = ch.path
@@ -583,7 +672,12 @@ func (w *Writer) markEmitted(wrote bool) {
 func (w *Writer) resetData() {
 	for _, g := range w.groups {
 		for _, ch := range g.channels {
-			ch.raw = ch.raw[:0]
+			if ch.aliased {
+				ch.raw = nil
+				ch.aliased = false
+			} else if ch.raw != nil {
+				ch.raw = ch.raw[:0]
+			}
 			ch.strs = nil
 			ch.n = 0
 		}
@@ -692,6 +786,7 @@ func (o *wObj) set(name string, value any) error {
 	}
 	upsert(&o.props, p)
 	o.dirty = true
+	o.rev++
 	return nil
 }
 
@@ -744,4 +839,123 @@ func normalizeProp(name string, value any) (Property, error) {
 	default:
 		return Property{}, fmt.Errorf("%w: property %q has Go type %T", ErrType, name, value)
 	}
+}
+
+// metaInput is the buildMeta input that changes the encoded bytes. A repeat
+// flush with the same counts, dirty flags, property revisions, and previous
+// index reuses the last encoding. A property set bumps rev, so a mutation
+// cannot return a stale blob. Sample-count changes miss the cache because
+// the raw index contains the count.
+type metaInput struct {
+	hasRaw      bool
+	started     bool
+	rootDirty   bool
+	rootEmitted bool
+	rootRev     uint64
+	groups      []metaGroup
+	data        []metaData
+	prevOrder   []string
+	prev        []metaPrev
+}
+
+type metaGroup struct {
+	dirty   bool
+	emitted bool
+	rev     uint64
+	chans   []metaCh
+}
+
+type metaCh struct {
+	dirty   bool
+	emitted bool
+	rev     uint64
+	dt      DataType
+}
+
+type metaData struct {
+	path  string
+	dt    DataType
+	n     int
+	total uint64
+}
+
+type metaPrev struct {
+	path string
+	idx  wIndex
+}
+
+func (w *Writer) metaMatch(data []*wChannel, hasRaw bool) bool {
+	if !w.metaValid {
+		return false
+	}
+	in := &w.metaIn
+	if in.hasRaw != hasRaw || in.started != w.started || in.rootDirty != w.root.dirty || in.rootEmitted != w.root.emitted || in.rootRev != w.root.rev {
+		return false
+	}
+	if len(in.groups) != len(w.groups) || len(in.data) != len(data) || len(in.prevOrder) != len(w.prevOrder) || len(in.prev) != len(w.prevIndex) {
+		return false
+	}
+	for i, g := range w.groups {
+		mg := &in.groups[i]
+		if mg.dirty != g.obj.dirty || mg.emitted != g.obj.emitted || mg.rev != g.obj.rev || len(mg.chans) != len(g.channels) {
+			return false
+		}
+		for j, ch := range g.channels {
+			c := mg.chans[j]
+			if c.dirty != ch.obj.dirty || c.emitted != ch.obj.emitted || c.rev != ch.obj.rev || c.dt != ch.dt {
+				return false
+			}
+		}
+	}
+	for i, ch := range data {
+		total, err := channelTotal(ch)
+		if err != nil || in.data[i] != (metaData{path: ch.path, dt: ch.dt, n: ch.n, total: total}) {
+			return false
+		}
+	}
+	for i := range in.prevOrder {
+		if in.prevOrder[i] != w.prevOrder[i] {
+			return false
+		}
+	}
+	for _, p := range in.prev {
+		v, ok := w.prevIndex[p.path]
+		if !ok || v != p.idx {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *Writer) snapshotMeta(data []*wChannel, hasRaw bool) (metaInput, error) {
+	in := metaInput{
+		hasRaw: hasRaw, started: w.started,
+		rootDirty: w.root.dirty, rootEmitted: w.root.emitted, rootRev: w.root.rev,
+	}
+	for _, g := range w.groups {
+		mg := metaGroup{dirty: g.obj.dirty, emitted: g.obj.emitted, rev: g.obj.rev}
+		for _, ch := range g.channels {
+			mg.chans = append(mg.chans, metaCh{dirty: ch.obj.dirty, emitted: ch.obj.emitted, rev: ch.obj.rev, dt: ch.dt})
+		}
+		in.groups = append(in.groups, mg)
+	}
+	for _, ch := range data {
+		total, err := channelTotal(ch)
+		if err != nil {
+			return metaInput{}, err
+		}
+		in.data = append(in.data, metaData{path: ch.path, dt: ch.dt, n: ch.n, total: total})
+	}
+	in.prevOrder = append([]string(nil), w.prevOrder...)
+	if len(w.prevIndex) > 0 {
+		keys := make([]string, 0, len(w.prevIndex))
+		for k := range w.prevIndex {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			in.prev = append(in.prev, metaPrev{path: k, idx: w.prevIndex[k]})
+		}
+	}
+	return in, nil
 }

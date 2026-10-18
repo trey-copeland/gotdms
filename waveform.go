@@ -1,10 +1,12 @@
 package tdms
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/bits"
 	"time"
+	"unsafe"
 )
 
 // Numeric is the set of analog-waveform sample types. LabVIEW stores a
@@ -70,6 +72,9 @@ func (w Waveform[T]) TimeAt(i int) (time.Time, bool) {
 
 // Times returns one time.Time per sample using the same rule as TimeAt.
 // A missing start time or a value that does not fit in time.Time returns an error.
+//
+// The result is one time.Time per sample. That allocation is inherent to the
+// return type; there is no packed timestamp slice behind it.
 func (w Waveform[T]) Times() ([]time.Time, error) {
 	if !w.hasStart {
 		return nil, fmt.Errorf("%w: waveform has no wf_start_time", ErrArgument)
@@ -227,15 +232,145 @@ func waveformSamples[T Numeric](v any) ([]T, bool) {
 // LinearScale, applies it to produce float64 engineering samples. With no
 // scale, Y is converted to float64 and left unchanged. ReadWaveform never
 // scales. WriteWaveform does not invert this conversion.
+//
+// The returned waveform is the only sample allocation. A float64 channel is
+// scaled in place in that slice. Other numeric types are decoded from a
+// short scratch window into the same slice. The channel's stored samples
+// are not modified. ApplyScale on an existing Waveform still allocates a
+// new Y so the receiver is left unchanged.
 func ScaledWaveform[T Numeric](c *Channel) (Waveform[float64], error) {
-	wf, err := ReadWaveform[T](c)
-	if err != nil {
-		return Waveform[float64]{}, err
+	if c == nil {
+		return Waveform[float64]{}, wrap("read", "", fmt.Errorf("%w: nil channel", ErrArgument))
 	}
+	h := c.WaveformHeader()
+	if !c.hasDT {
+		if c.total == 0 {
+			return Waveform[float64]{
+				Start: h.Start, Increment: h.Increment, Y: []float64{}, Unit: h.Unit,
+				hasStart: h.HasStart, hasIncrement: h.HasIncrement,
+			}, nil
+		}
+		return Waveform[float64]{}, wrap("read", c.path, ErrCorrupt)
+	}
+	var zero T
+	if err := sampleMatches(c.dt, zero); err != nil {
+		return Waveform[float64]{}, wrap("read", c.path, err)
+	}
+	scale := LinearScale{Slope: 1, Intercept: 0}
 	if sc, ok := c.LinearScale(); ok {
-		return wf.ApplyScale(sc), nil
+		scale = sc
 	}
-	return wf.ApplyScale(LinearScale{Slope: 1, Intercept: 0}), nil
+	y, err := c.readScaled(scale)
+	if err != nil {
+		return Waveform[float64]{}, wrap("read", c.path, err)
+	}
+	return Waveform[float64]{
+		Start: h.Start, Increment: h.Increment, Y: y, Unit: h.Unit,
+		hasStart: h.HasStart, hasIncrement: h.HasIncrement,
+	}, nil
+}
+
+func (c *Channel) readScaled(scale LinearScale) ([]float64, error) {
+	if c.file == nil || c.file.r == nil {
+		return nil, ErrClosed
+	}
+	n := c.Len()
+	y := make([]float64, n)
+	if n == 0 {
+		return y, nil
+	}
+	if c.dt.storage() == TypeFloat64 && nativeLittleEndian {
+		raw := unsafe.Slice((*byte)(unsafe.Pointer(&y[0])), n*8)
+		if err := c.fillPacked(c.file.r, 0, n, 8, raw); err != nil {
+			return nil, err
+		}
+		applyInPlace(y, scale)
+		return y, nil
+	}
+	sz, ok := c.dt.Size()
+	if !ok || sz <= 0 {
+		return nil, fmt.Errorf("%w: %s", ErrUnsupported, c.dt)
+	}
+	done := 0
+	for done < n {
+		take := n - done
+		if take > strideChunk/sz {
+			take = strideChunk / sz
+		}
+		if take < 1 {
+			take = 1
+		}
+		buf := borrowScratch(take * sz)
+		err := c.fillPacked(c.file.r, done, take, sz, buf[:take*sz])
+		if err != nil {
+			releaseScratch(buf)
+			return nil, err
+		}
+		expandScaled(c.dt, buf[:take*sz], y[done:done+take], scale)
+		releaseScratch(buf)
+		done += take
+	}
+	return y, nil
+}
+
+func applyInPlace(y []float64, scale LinearScale) {
+	if scale.Slope == 1 && scale.Intercept == 0 {
+		return
+	}
+	s, b := scale.Slope, scale.Intercept
+	for i, v := range y {
+		y[i] = v*s + b
+	}
+}
+
+func expandScaled(dt DataType, b []byte, y []float64, scale LinearScale) {
+	s, icept := scale.Slope, scale.Intercept
+	switch dt.storage() {
+	case TypeInt8:
+		for i := range y {
+			y[i] = float64(int8(b[i]))*s + icept
+		}
+	case TypeUint8:
+		for i := range y {
+			y[i] = float64(b[i])*s + icept
+		}
+	case TypeInt16:
+		for i := range y {
+			y[i] = float64(int16(binary.LittleEndian.Uint16(b[i*2:])))*s + icept
+		}
+	case TypeUint16:
+		for i := range y {
+			y[i] = float64(binary.LittleEndian.Uint16(b[i*2:]))*s + icept
+		}
+	case TypeInt32:
+		for i := range y {
+			y[i] = float64(int32(binary.LittleEndian.Uint32(b[i*4:])))*s + icept
+		}
+	case TypeUint32:
+		for i := range y {
+			y[i] = float64(binary.LittleEndian.Uint32(b[i*4:]))*s + icept
+		}
+	case TypeFloat32:
+		for i := range y {
+			y[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:])))*s + icept
+		}
+	case TypeInt64:
+		for i := range y {
+			y[i] = float64(int64(binary.LittleEndian.Uint64(b[i*8:])))*s + icept
+		}
+	case TypeUint64:
+		for i := range y {
+			y[i] = float64(binary.LittleEndian.Uint64(b[i*8:]))*s + icept
+		}
+	case TypeFloat64:
+		for i := range y {
+			y[i] = math.Float64frombits(binary.LittleEndian.Uint64(b[i*8:]))*s + icept
+		}
+	default:
+		for i := range y {
+			y[i] = math.NaN()
+		}
+	}
 }
 
 // WriteWaveform appends Y and sets the LabVIEW waveform properties

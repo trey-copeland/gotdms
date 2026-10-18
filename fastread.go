@@ -2,7 +2,10 @@ package tdms
 
 import (
 	"io"
+	"math"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -27,6 +30,22 @@ var (
 	stridePool = sync.Pool{
 		New: func() any { return make([]byte, strideChunk) },
 	}
+	// readBufPuts counts buffers returned to readBufPool. Tests use it to
+	// check Close, early end, and error paths. Gets that miss the pool call
+	// New and are not counted here.
+	readBufPuts atomic.Int64
+
+	// contigDirect selects how a contiguous fixed-size Cursor reads.
+	// 0 always uses the sequential buffer. 1 (the default) ReadAts straight
+	// into the batch when that batch is at least cursorDirectMin bytes, which
+	// is the measured win, and keeps the buffer for smaller batches. 2 always
+	// ReadAts, including sizes that lost the comparison. Benchmarks set this.
+	contigDirect = 1
+
+	// cursorDirectMin is the batch size, in bytes, where skipping the
+	// sequential buffer won. 8 KiB lost (BenchmarkCursorDirectTiny); 32 KiB
+	// and up won (BenchmarkCursorDirectSmall, Boundary, Large).
+	cursorDirectMin = 32 << 10
 )
 
 // seqReader serves sequential Cursor reads from a pooled buffer. Reads at
@@ -52,18 +71,26 @@ func newSeqReader(r io.ReaderAt, size int) *seqReader {
 	if buf == nil {
 		buf = make([]byte, size)
 	}
-	return &seqReader{r: r, buf: buf}
+	s := &seqReader{r: r, buf: buf}
+	runtime.SetFinalizer(s, (*seqReader).release)
+	return s
 }
 
 func (s *seqReader) release() {
-	if s == nil || s.buf == nil {
+	if s == nil {
 		return
 	}
-	if cap(s.buf) == DefaultReadBuffer {
-		readBufPool.Put(s.buf[:DefaultReadBuffer])
+	runtime.SetFinalizer(s, nil)
+	if s.buf == nil {
+		return
 	}
+	buf := s.buf
 	s.buf = nil
 	s.valid = 0
+	if cap(buf) == DefaultReadBuffer {
+		readBufPool.Put(buf[:DefaultReadBuffer])
+		readBufPuts.Add(1)
+	}
 }
 
 func (s *seqReader) ReadAt(p []byte, off int64) (int, error) {
@@ -214,22 +241,42 @@ func (c *Channel) fillPacked(r io.ReaderAt, start, n, size int, dst []byte) erro
 	return nil
 }
 
+// fitsSpan reports whether n samples of size bytes at stride fit in dst and
+// src without an int overflow. Word loads are only used when this is true, so
+// a short tail cannot make an unsafe load read past the slice.
+func fitsSpan(n, stride, size, dstLen, srcLen int) bool {
+	if n <= 0 || stride <= 0 || size <= 0 || n > math.MaxInt/size {
+		return false
+	}
+	if dstLen < n*size {
+		return false
+	}
+	if n > 1 && stride > (math.MaxInt-size)/(n-1) {
+		return false
+	}
+	return srcLen >= (n-1)*stride+size
+}
+
 func deinterleave(dst, src []byte, size, stride, n int) {
 	if n <= 0 || size <= 0 {
 		return
 	}
 	// Contiguous span: one move. Interleaved values are pulled out of a
-	// stride window. When every sample of this width stays naturally aligned,
-	// copy a machine word instead of one byte at a time. Mixed-width layouts
-	// whose stride is not a multiple of the sample width stay on the byte path
-	// so an unaligned access is never performed.
+	// stride window. When every sample of this width stays naturally aligned
+	// and the last sample's bytes sit inside src, copy a machine word.
+	// Mixed-width layouts whose stride is not a multiple of the sample width,
+	// and windows whose first byte is unaligned, stay on the byte path so an
+	// unaligned access is never performed. The byte path also covers a short
+	// buffer: the index expression panics instead of an unsafe load reading
+	// past the slice.
+	safe := fitsSpan(n, stride, size, len(dst), len(src))
 	switch size {
 	case 1:
 		for i := 0; i < n; i++ {
 			dst[i] = src[i*stride]
 		}
 	case 2:
-		if wordAligned(dst, src, stride, 2) {
+		if safe && wordAligned(dst, src, stride, 2) {
 			deinterleave16(dst, src, stride, n)
 			return
 		}
@@ -240,7 +287,7 @@ func deinterleave(dst, src []byte, size, stride, n int) {
 			dst[d+1] = src[s+1]
 		}
 	case 4:
-		if wordAligned(dst, src, stride, 4) {
+		if safe && wordAligned(dst, src, stride, 4) {
 			deinterleave32(dst, src, stride, n)
 			return
 		}
@@ -253,7 +300,7 @@ func deinterleave(dst, src []byte, size, stride, n int) {
 			dst[d+3] = src[s+3]
 		}
 	case 8:
-		if wordAligned(dst, src, stride, 8) {
+		if safe && wordAligned(dst, src, stride, 8) {
 			deinterleave64(dst, src, stride, n)
 			return
 		}
@@ -270,7 +317,7 @@ func deinterleave(dst, src []byte, size, stride, n int) {
 			dst[d+7] = src[s+7]
 		}
 	case 16:
-		if wordAligned(dst, src, stride, 8) {
+		if safe && wordAligned(dst, src, stride, 8) {
 			deinterleave128(dst, src, stride, n)
 			return
 		}
@@ -336,4 +383,153 @@ func deinterleave128(dst, src []byte, stride, n int) {
 		*(*uint64)(unsafe.Pointer(&dst[d])) = *(*uint64)(unsafe.Pointer(&src[s]))
 		*(*uint64)(unsafe.Pointer(&dst[d+8])) = *(*uint64)(unsafe.Pointer(&src[s+8]))
 	}
+}
+
+// contiguousBytes reports whether every span of c is a packed fixed-size run
+// (stride equals the sample width). Cursor can then ReadAt straight into the
+// batch. Interleaved and string channels are not contiguous.
+func (c *Channel) contiguousBytes() bool {
+	if c == nil || len(c.spans) == 0 {
+		return false
+	}
+	sz, ok := c.dt.Size()
+	if !ok || sz <= 0 {
+		return false
+	}
+	for i := range c.spans {
+		sp := &c.spans[i]
+		if sp.str || sp.stride != int64(sz) || sp.typeSize != sz {
+			return false
+		}
+	}
+	return true
+}
+
+func fixedNativeDT(dt DataType) bool {
+	switch dt.storage() {
+	case TypeInt8, TypeInt16, TypeInt32, TypeInt64,
+		TypeUint8, TypeUint16, TypeUint32, TypeUint64,
+		TypeFloat32, TypeFloat64,
+		TypeComplex64, TypeComplex128:
+		return true
+	default:
+		return false
+	}
+}
+
+// overlayAt is the byte view of dst[sample:sample+n] for a fixed-native slice.
+// ok is false when dst is not that kind of slice or the range does not fit.
+// n == 0 returns a nil view and ok.
+func overlayAt(dst any, sample, n, sz int) ([]byte, bool) {
+	if n == 0 {
+		return nil, true
+	}
+	if sample < 0 || sz <= 0 {
+		return nil, false
+	}
+	switch s := dst.(type) {
+	case []int8:
+		return overlaySlice(s, sample, n, sz, 1)
+	case []int16:
+		return overlaySlice(s, sample, n, sz, 2)
+	case []int32:
+		return overlaySlice(s, sample, n, sz, 4)
+	case []int64:
+		return overlaySlice(s, sample, n, sz, 8)
+	case []uint8:
+		return overlaySlice(s, sample, n, sz, 1)
+	case []uint16:
+		return overlaySlice(s, sample, n, sz, 2)
+	case []uint32:
+		return overlaySlice(s, sample, n, sz, 4)
+	case []uint64:
+		return overlaySlice(s, sample, n, sz, 8)
+	case []float32:
+		return overlaySlice(s, sample, n, sz, 4)
+	case []float64:
+		return overlaySlice(s, sample, n, sz, 8)
+	case []complex64:
+		return overlaySlice(s, sample, n, sz, 8)
+	case []complex128:
+		return overlaySlice(s, sample, n, sz, 16)
+	default:
+		return nil, false
+	}
+}
+
+func overlaySlice[T fixedNative](s []T, sample, n, sz, want int) ([]byte, bool) {
+	if sz != want || sample+n > len(s) {
+		return nil, false
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(&s[sample])), n*sz), true
+}
+
+// refill reuses cur.cur's backing array when it is already a []T for this
+// channel. The interface value is left in place when the length does not
+// change, so a long scan does not box a new slice header per batch.
+func (cur *Cursor) refill(r io.ReaderAt, n int) error {
+	if done, err := cur.refillInPlace(r, n); done {
+		return err
+	}
+	v, err := cur.ch.readRangeFrom(r, cur.pos, n, cur.cur)
+	if err != nil {
+		return err
+	}
+	cur.cur = v
+	return nil
+}
+
+func (cur *Cursor) refillInPlace(r io.ReaderAt, n int) (bool, error) {
+	if !nativeLittleEndian || cur.cur == nil || cur.ch == nil || !fixedNativeDT(cur.ch.dt) {
+		return false, nil
+	}
+	sz, ok := cur.ch.dt.Size()
+	if !ok {
+		return false, nil
+	}
+	switch s := cur.cur.(type) {
+	case []int8:
+		return refillSlice(cur, r, s, n, sz)
+	case []int16:
+		return refillSlice(cur, r, s, n, sz)
+	case []int32:
+		return refillSlice(cur, r, s, n, sz)
+	case []int64:
+		return refillSlice(cur, r, s, n, sz)
+	case []uint8:
+		return refillSlice(cur, r, s, n, sz)
+	case []uint16:
+		return refillSlice(cur, r, s, n, sz)
+	case []uint32:
+		return refillSlice(cur, r, s, n, sz)
+	case []uint64:
+		return refillSlice(cur, r, s, n, sz)
+	case []float32:
+		return refillSlice(cur, r, s, n, sz)
+	case []float64:
+		return refillSlice(cur, r, s, n, sz)
+	case []complex64:
+		return refillSlice(cur, r, s, n, sz)
+	case []complex128:
+		return refillSlice(cur, r, s, n, sz)
+	default:
+		return false, nil
+	}
+}
+
+func refillSlice[T fixedNative](cur *Cursor, r io.ReaderAt, s []T, n, sz int) (bool, error) {
+	if cap(s) < n || sz != int(unsafe.Sizeof(s[0])) {
+		return false, nil
+	}
+	out := s[:n]
+	if n > 0 {
+		raw := unsafe.Slice((*byte)(unsafe.Pointer(&out[0])), n*sz)
+		if err := cur.ch.fillPacked(r, cur.pos, n, sz, raw); err != nil {
+			return true, err
+		}
+	}
+	if len(out) != len(s) {
+		cur.cur = out
+	}
+	return true, nil
 }
