@@ -35,6 +35,12 @@
 // accepted on read. DAQmx raw data is detected and rejected with ErrDAQmx
 // rather than decoded.
 //
+// Sets of files are the dataset subpackage
+// (github.com/trey-copeland/gotdms/dataset). The caller declares the timestamp
+// channel, globally or per group. Waveform wf_start_time and wf_increment are
+// a fallback when no timestamp channel was declared. This package stays a
+// single-file reader and writer.
+//
 // Malformed input returns an error. The package does not panic on truncated or
 // corrupt files.
 package tdms

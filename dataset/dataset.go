@@ -1,0 +1,879 @@
+package dataset
+
+import (
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/trey-copeland/gotdms"
+)
+
+// OverlapPolicy decides what happens when a later file contains samples at
+// times the merged series already covers.
+type OverlapPolicy int
+
+const (
+	// OverlapKeepFirst drops the incoming sample. This is the default.
+	OverlapKeepFirst OverlapPolicy = iota
+	// OverlapKeepLast drops already kept samples that the incoming sample
+	// replaces (their time is not strictly before the incoming time).
+	OverlapKeepLast
+	// OverlapError makes the read return ErrOverlap.
+	OverlapError
+)
+
+// TimeSource is how an occurrence got its time axis.
+type TimeSource int
+
+const (
+	// TimeNone means the occurrence is untimed. The axis is the sample index.
+	TimeNone TimeSource = iota
+	// TimeTimestamp means a declared timestamp channel. The channel itself
+	// uses its own values. A data channel uses the channel named for its group.
+	TimeTimestamp
+	// TimeWaveform means wf_start_time and wf_increment. This is the fallback
+	// used only when the group was not given a timestamp channel.
+	TimeWaveform
+)
+
+func (s TimeSource) String() string {
+	switch s {
+	case TimeNone:
+		return "none"
+	case TimeTimestamp:
+		return "timestamp"
+	case TimeWaveform:
+		return "waveform"
+	default:
+		return fmt.Sprintf("TimeSource(%d)", int(s))
+	}
+}
+
+// Sentinel errors. *AmbiguousError unwraps to ErrAmbiguous.
+var (
+	ErrNoFiles   = errSentinel("no TDMS files")
+	ErrNotFound  = errSentinel("channel not found")
+	ErrAmbiguous = errSentinel("ambiguous channel name")
+	ErrUntimed   = errSentinel("channel has no time axis")
+	ErrOverlap   = errSentinel("overlapping samples")
+	ErrMonotonic = errSentinel("timestamp channel is not monotonic")
+	ErrArgument  = errSentinel("invalid argument")
+)
+
+type errSentinel string
+
+func (e errSentinel) Error() string { return string(e) }
+
+// AmbiguousError is returned when a channel name occurs in more than one
+// group and Selector.Group is empty. Candidates lists every occurrence.
+// Nothing is chosen automatically.
+type AmbiguousError struct {
+	Name       string
+	Candidates []Occurrence
+}
+
+func (e *AmbiguousError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ambiguous channel %q:", e.Name)
+	for _, c := range e.Candidates {
+		fmt.Fprintf(&b, " group %q file %s;", c.Group, c.File)
+	}
+	return b.String()
+}
+
+func (e *AmbiguousError) Unwrap() error { return ErrAmbiguous }
+
+// Occurrence is one channel in one file. The same name in another group or
+// file is a separate occurrence.
+type Occurrence struct {
+	Name  string
+	Group string
+	File  string
+	// IsTimestamp is true when this channel is the declared timestamp channel
+	// for its group. Its values are the time axis. It does not reference
+	// another channel.
+	IsTimestamp bool
+	Samples     int
+	Timed       bool
+	Source      TimeSource
+	// Start is the earliest sample time. Last is the latest. Both are zero
+	// when Timed is false or Samples is 0. For a positive increment, Start is
+	// the first sample and Last is the last.
+	Start time.Time
+	Last  time.Time
+	// Dt is the uniform step in seconds when one can be determined. It is 0
+	// for untimed channels, for a single timestamp sample, and for an
+	// irregular or non-positive timestamp axis. Waveform fallback stores
+	// wf_increment, which may be negative or zero.
+	Dt float64
+	// Timestamp is the declared timestamp channel name when this data channel
+	// took its axis from that channel. It is empty on the timestamp channel
+	// itself and when Source is not TimeTimestamp.
+	Timestamp string
+}
+
+// Selector names a channel. Group empty means the name must belong to one
+// group across the dataset. Several files in that group are merged.
+type Selector struct {
+	Name  string
+	Group string
+}
+
+// Gap is a hole between merged pieces. From is the exclusive end of the
+// previous sample (last + dt). To is the next kept sample. Y has no filler.
+// From is after To when dt is negative.
+type Gap struct {
+	From time.Time
+	To   time.Time
+}
+
+// Series is a merged channel read. Times is nil when Timed is false.
+// Origin is the dataset origin used by RelativeTimes. Dt is the shared
+// positive increment when every contributing sample has that increment,
+// else 0.
+type Series struct {
+	Name        string
+	Group       string
+	Files       []string
+	Timed       bool
+	IsTimestamp bool
+	Source      TimeSource
+	Dt          float64
+	Y           []float64
+	Times       []time.Time
+	Gaps        []Gap
+	Origin      time.Time
+}
+
+// RelativeTimes returns seconds since Origin for a timed series.
+// An untimed series returns the sample indexes 0, 1, 2, … as float64.
+// Origin is ignored in that case. The two are distinguished by Timed.
+func (s Series) RelativeTimes() []float64 {
+	if !s.Timed {
+		out := make([]float64, len(s.Y))
+		for i := range out {
+			out[i] = float64(i)
+		}
+		return out
+	}
+	out := make([]float64, len(s.Times))
+	for i, ts := range s.Times {
+		out[i] = ts.Sub(s.Origin).Seconds()
+	}
+	return out
+}
+
+// Interp chooses Resample's opt-in interpolation. Reads never resample unless
+// Resample is called.
+type Interp int
+
+const (
+	// InterpLinear interpolates between adjacent native samples.
+	InterpLinear Interp = iota
+	// InterpPrevious holds the latest native sample at or before the grid time.
+	InterpPrevious
+)
+
+// Dataset is an indexed set of TDMS files. It is safe for concurrent reads
+// after Open returns. Open closes every file it scans.
+type Dataset struct {
+	files  []string
+	occ    []Occurrence
+	origin time.Time
+	opt    options
+}
+
+type options struct {
+	workers     int
+	readWorkers int
+	origin      time.Time
+	originSet   bool
+	epoch       time.Time
+	epochSet    bool
+	overlap     OverlapPolicy
+	tsName      string
+	tsNameSet   bool
+	ts          map[string]string
+}
+
+type clockMode int
+
+const (
+	clockNone clockMode = iota
+	clockNamed
+	clockOptOut
+)
+
+// Option configures OpenFiles and OpenGlob.
+type Option func(*options)
+
+// WithWorkers sets the catalog pool size. Non-positive selects the default,
+// which is GOMAXPROCS capped at 8.
+func WithWorkers(n int) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.workers = n
+		}
+	}
+}
+
+// WithReadWorkers sets how many files Read and ReadMany open at once.
+// Non-positive selects the default of 4.
+func WithReadWorkers(n int) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.readWorkers = n
+		}
+	}
+}
+
+// WithOrigin sets the zero of RelativeTimes. Without it, the origin is the
+// earliest Start among timed occurrences. An explicit origin may lie after
+// some samples, which makes those relative times negative. This is not the
+// epoch of numeric timestamp values; that is WithNumericEpoch.
+func WithOrigin(t time.Time) Option {
+	return func(o *options) {
+		o.origin = t
+		o.originSet = true
+	}
+}
+
+// WithNumericEpoch sets the absolute time of numeric timestamp value 0.
+// Integers and floats in a declared timestamp channel are seconds since this
+// instant. Timestamp-typed channels ignore it. Without this option, Open
+// returns ErrArgument when a declared timestamp channel is numeric: the
+// numbers are not assumed to be Unix seconds. Use time.Unix(0, 0).UTC() for
+// seconds since the Unix epoch. The zero Time is a real epoch only when this
+// option is passed.
+func WithNumericEpoch(t time.Time) Option {
+	return func(o *options) {
+		o.epoch = t
+		o.epochSet = true
+	}
+}
+
+// WithOverlap sets the merge policy. The default is OverlapKeepFirst.
+func WithOverlap(p OverlapPolicy) Option {
+	return func(o *options) {
+		o.overlap = p
+	}
+}
+
+// WithTimestampChannelName declares that every group uses a timestamp channel
+// with this name, except groups named by WithTimestampChannel. name must be
+// non-empty. A group that has no channel of that name leaves its data channels
+// untimed; catalog still succeeds. A later call replaces the name.
+func WithTimestampChannelName(name string) Option {
+	return func(o *options) {
+		o.tsName = name
+		o.tsNameSet = true
+	}
+}
+
+// WithTimestampChannel declares the timestamp channel for one group. It
+// overrides WithTimestampChannelName for that group. A later call for the same
+// group replaces the earlier one. group must be non-empty. An empty name opts
+// the group out of the global name: no channel in the group is a timestamp
+// source, and waveform properties may still supply the fallback axis.
+func WithTimestampChannel(group, name string) Option {
+	return func(o *options) {
+		if o.ts == nil {
+			o.ts = map[string]string{}
+		}
+		o.ts[group] = name
+	}
+}
+
+func (o options) declared(group string) (string, clockMode) {
+	if n, ok := o.ts[group]; ok {
+		if n == "" {
+			return "", clockOptOut
+		}
+		return n, clockNamed
+	}
+	if o.tsNameSet {
+		return o.tsName, clockNamed
+	}
+	return "", clockNone
+}
+
+func defaultOptions() options {
+	n := runtime.GOMAXPROCS(0)
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return options{workers: n, readWorkers: 4, overlap: OverlapKeepFirst}
+}
+
+// OpenFiles indexes paths. Paths are cleaned to absolute paths and
+// de-duplicated. Metadata is read in parallel. Declared timestamp channels
+// are read so their span is known. Waveform fallback spans come from
+// StartTime, Increment, and Len, without loading samples.
+func OpenFiles(paths []string, opts ...Option) (*Dataset, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("%w", ErrNoFiles)
+	}
+	opt := defaultOptions()
+	for _, o := range opts {
+		if o != nil {
+			o(&opt)
+		}
+	}
+	if opt.workers < 1 {
+		opt.workers = 1
+	}
+	if opt.readWorkers < 1 {
+		opt.readWorkers = 1
+	}
+	if opt.tsNameSet && opt.tsName == "" {
+		return nil, fmt.Errorf("%w: timestamp channel name must be non-empty", ErrArgument)
+	}
+	for g := range opt.ts {
+		if g == "" {
+			return nil, fmt.Errorf("%w: timestamp channel group must be non-empty", ErrArgument)
+		}
+	}
+	abs, err := uniqueAbs(paths)
+	if err != nil {
+		return nil, err
+	}
+	if len(abs) == 0 {
+		return nil, fmt.Errorf("%w", ErrNoFiles)
+	}
+	parts := make([][]Occurrence, len(abs))
+	errs := make([]error, len(abs))
+	run(opt.workers, len(abs), func(i int) {
+		parts[i], errs[i] = indexFile(abs[i], opt)
+	})
+	for i, err := range errs {
+		if err != nil {
+			return nil, fmt.Errorf("dataset: index %s: %w", abs[i], err)
+		}
+	}
+	var occ []Occurrence
+	for _, p := range parts {
+		occ = append(occ, p...)
+	}
+	sort.Slice(occ, func(i, j int) bool {
+		if occ[i].File != occ[j].File {
+			return occ[i].File < occ[j].File
+		}
+		if occ[i].Group != occ[j].Group {
+			return occ[i].Group < occ[j].Group
+		}
+		return occ[i].Name < occ[j].Name
+	})
+	ds := &Dataset{files: abs, occ: occ, opt: opt}
+	ds.origin = opt.origin
+	if !opt.originSet {
+		ds.origin = earliest(occ)
+	}
+	return ds, nil
+}
+
+// OpenGlob indexes files matched by filepath.Glob(filepath.Join(dir, pattern)).
+// pattern is a filepath.Glob pattern relative to dir, such as "*.tdms".
+// An absolute pattern replaces dir, which is how filepath.Join works.
+// No matches returns ErrNoFiles. Recursive "**" is not supported.
+func OpenGlob(dir, pattern string, opts ...Option) (*Dataset, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, pattern))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrArgument, err)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrNoFiles, filepath.Join(dir, pattern))
+	}
+	return OpenFiles(matches, opts...)
+}
+
+// Origin is the zero of RelativeTimes.
+func (d *Dataset) Origin() time.Time { return d.origin }
+
+// Files returns the absolute paths that were indexed, in input order after
+// de-duplication. Glob results are sorted by filepath.Glob.
+func (d *Dataset) Files() []string {
+	out := make([]string, len(d.files))
+	copy(out, d.files)
+	return out
+}
+
+// Occurrences returns every channel occurrence. The slice is a copy.
+func (d *Dataset) Occurrences() []Occurrence { return cloneOcc(d.occ) }
+
+// Find returns occurrences whose channel name equals name. Every group and
+// file is included. The slice is a copy.
+func (d *Dataset) Find(name string) []Occurrence {
+	var out []Occurrence
+	for _, o := range d.occ {
+		if o.Name == name {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// Search returns occurrences whose channel name contains substr.
+// The match is case-sensitive. An empty substr matches every occurrence.
+func (d *Dataset) Search(substr string) []Occurrence {
+	var out []Occurrence
+	for _, o := range d.occ {
+		if strings.Contains(o.Name, substr) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// Match returns occurrences whose channel name matches pattern.
+// pattern uses filepath.Match syntax ('*', '?', character classes).
+// A bad pattern returns ErrArgument.
+func (d *Dataset) Match(pattern string) ([]Occurrence, error) {
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrArgument, err)
+	}
+	var out []Occurrence
+	for _, o := range d.occ {
+		ok, err := filepath.Match(pattern, o.Name)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrArgument, err)
+		}
+		if ok {
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
+// Read merges every file of the channel and returns all samples.
+// Untimed channels are concatenated in file-path order.
+func (d *Dataset) Read(sel Selector) (Series, error) {
+	return d.read(sel, time.Time{}, time.Time{}, false)
+}
+
+// ReadWindow merges the channel and keeps samples with start <= t < end.
+// Untimed channels return ErrUntimed. Files whose span misses the window are
+// not opened. A timestamp axis that steps backwards returns ErrMonotonic.
+func (d *Dataset) ReadWindow(sel Selector, start, end time.Time) (Series, error) {
+	if !end.After(start) {
+		return Series{}, fmt.Errorf("%w: window end must be after start", ErrArgument)
+	}
+	return d.read(sel, start, end, true)
+}
+
+// ReadMany reads each selector over the same half-open window [start, end).
+// Every series uses this dataset's Origin, so RelativeTimes line up.
+// Selectors run with WithReadWorkers concurrency. The result order matches
+// sels. One untimed selector fails the call with ErrUntimed.
+func (d *Dataset) ReadMany(sels []Selector, start, end time.Time) ([]Series, error) {
+	if !end.After(start) {
+		return nil, fmt.Errorf("%w: window end must be after start", ErrArgument)
+	}
+	out := make([]Series, len(sels))
+	errs := make([]error, len(sels))
+	run(d.opt.readWorkers, len(sels), func(i int) {
+		out[i], errs[i] = d.read(sels[i], start, end, true)
+	})
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (d *Dataset) read(sel Selector, start, end time.Time, window bool) (Series, error) {
+	hits, err := d.resolve(sel)
+	if err != nil {
+		return Series{}, err
+	}
+	for i := 1; i < len(hits); i++ {
+		if hits[i].Timed != hits[0].Timed || hits[i].Source != hits[0].Source || hits[i].IsTimestamp != hits[0].IsTimestamp {
+			return Series{}, fmt.Errorf("%w: %q group %q has mixed time axes", ErrArgument, hits[0].Name, hits[0].Group)
+		}
+	}
+	if window {
+		for _, h := range hits {
+			if !h.Timed {
+				return Series{}, fmt.Errorf("%w: %q group %q", ErrUntimed, h.Name, h.Group)
+			}
+		}
+	}
+	type job struct {
+		o     Occurrence
+		index int
+	}
+	var jobs []job
+	for i, o := range hits {
+		if window && o.Timed && !hitsWindow(o, start, end) {
+			continue
+		}
+		jobs = append(jobs, job{o: o, index: i})
+	}
+	pieces := make([]piece, len(jobs))
+	errs := make([]error, len(jobs))
+	run(d.opt.readWorkers, len(jobs), func(i int) {
+		pieces[i], errs[i] = readOccurrence(jobs[i].o, d.opt, start, end, window)
+	})
+	for i, err := range errs {
+		if err != nil {
+			return Series{}, fmt.Errorf("dataset: read %s %q/%q: %w", jobs[i].o.File, jobs[i].o.Group, jobs[i].o.Name, err)
+		}
+	}
+	sort.Slice(pieces, func(i, j int) bool {
+		if !pieces[i].start.Equal(pieces[j].start) {
+			if pieces[i].timed != pieces[j].timed {
+				return pieces[i].timed
+			}
+			return pieces[i].start.Before(pieces[j].start)
+		}
+		return pieces[i].file < pieces[j].file
+	})
+	merged, err := mergePieces(pieces, d.opt.overlap)
+	if err != nil {
+		return Series{}, err
+	}
+	merged.Name = sel.Name
+	if sel.Group != "" {
+		merged.Group = sel.Group
+	} else if len(hits) > 0 {
+		merged.Group = hits[0].Group
+	}
+	merged.Origin = d.origin
+	if len(hits) > 0 {
+		merged.Source = hits[0].Source
+		merged.Timed = hits[0].Timed
+		merged.IsTimestamp = hits[0].IsTimestamp
+	}
+	if !merged.Timed {
+		merged.Times = nil
+		merged.Dt = 0
+		merged.Gaps = nil
+	}
+	return merged, nil
+}
+
+func (d *Dataset) resolve(sel Selector) ([]Occurrence, error) {
+	if sel.Name == "" {
+		return nil, fmt.Errorf("%w: empty channel name", ErrArgument)
+	}
+	var hits []Occurrence
+	groups := map[string]struct{}{}
+	for _, o := range d.occ {
+		if o.Name != sel.Name {
+			continue
+		}
+		if sel.Group != "" && o.Group != sel.Group {
+			continue
+		}
+		hits = append(hits, o)
+		groups[o.Group] = struct{}{}
+	}
+	if len(hits) == 0 {
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, sel.Name)
+	}
+	if sel.Group == "" && len(groups) > 1 {
+		return nil, &AmbiguousError{Name: sel.Name, Candidates: cloneOcc(hits)}
+	}
+	return hits, nil
+}
+
+func hitsWindow(o Occurrence, start, end time.Time) bool {
+	if !o.Timed || o.Samples == 0 {
+		return false
+	}
+	return o.Start.Before(end) && !o.Last.Before(start)
+}
+
+func earliest(occ []Occurrence) time.Time {
+	var origin time.Time
+	set := false
+	for _, o := range occ {
+		if !o.Timed || o.Samples == 0 {
+			continue
+		}
+		if !set || o.Start.Before(origin) {
+			origin = o.Start
+			set = true
+		}
+	}
+	return origin
+}
+
+func uniqueAbs(paths []string) ([]string, error) {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, p := range paths {
+		if p == "" {
+			return nil, fmt.Errorf("%w: empty path", ErrArgument)
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[abs]; ok {
+			continue
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, err
+		}
+		seen[abs] = struct{}{}
+		out = append(out, abs)
+	}
+	return out, nil
+}
+
+func cloneOcc(in []Occurrence) []Occurrence {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Occurrence, len(in))
+	copy(out, in)
+	return out
+}
+
+func run(workers, n int, fn func(i int)) {
+	if n <= 0 {
+		return
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > n {
+		workers = n
+	}
+	var wg sync.WaitGroup
+	jobs := make(chan int)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				fn(i)
+			}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func indexFile(path string, opt options) ([]Occurrence, error) {
+	f, err := tdms.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []Occurrence
+	for _, g := range f.Groups() {
+		name, mode := opt.declared(g.Name())
+		byName := map[string]*tdms.Channel{}
+		var chans []*tdms.Channel
+		for _, ch := range g.Channels() {
+			chans = append(chans, ch)
+			byName[ch.Name()] = ch
+		}
+		var tsCh *tdms.Channel
+		var tsTimes []time.Time
+		tsUsable := false
+		if mode == clockNamed {
+			tsCh = byName[name]
+			if tsCh != nil {
+				tsTimes, tsUsable, err = loadDeclaredTimes(tsCh, opt)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		for _, ch := range chans {
+			o := Occurrence{
+				Name:    ch.Name(),
+				Group:   ch.GroupName(),
+				File:    path,
+				Samples: ch.Len(),
+			}
+			switch mode {
+			case clockNamed:
+				if ch.Name() == name {
+					o.IsTimestamp = true
+					if tsUsable {
+						o.Timed = true
+						o.Source = TimeTimestamp
+						applySpan(&o, tsTimes)
+					}
+					break
+				}
+				if tsCh != nil && tsUsable && len(tsTimes) == ch.Len() {
+					o.Timed = true
+					o.Source = TimeTimestamp
+					o.Timestamp = name
+					applySpan(&o, tsTimes)
+					break
+				}
+			case clockOptOut, clockNone:
+				if err := applyWaveform(&o, ch); err != nil {
+					return nil, err
+				}
+			}
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
+func loadDeclaredTimes(ch *tdms.Channel, opt options) ([]time.Time, bool, error) {
+	if ch.DataType() == tdms.TypeTimestamp {
+		if ch.Len() == 0 {
+			return nil, true, nil
+		}
+		ts, err := ch.Times()
+		if err != nil {
+			return nil, true, err
+		}
+		return ts, true, nil
+	}
+	if !numericTimeType(ch.DataType()) {
+		return nil, false, nil
+	}
+	if ch.Len() == 0 {
+		return nil, true, nil
+	}
+	if !opt.epochSet {
+		return nil, true, fmt.Errorf("%w: numeric timestamp channel %q in group %q requires WithNumericEpoch", ErrArgument, ch.Name(), ch.GroupName())
+	}
+	ys, err := ch.Float64s()
+	if err != nil {
+		return nil, true, err
+	}
+	out := make([]time.Time, len(ys))
+	for i, v := range ys {
+		tm, err := secondsToTime(opt.epoch, v)
+		if err != nil {
+			return nil, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+		}
+		out[i] = tm
+	}
+	return out, true, nil
+}
+
+func numericTimeType(dt tdms.DataType) bool {
+	switch dt {
+	case tdms.TypeInt8, tdms.TypeInt16, tdms.TypeInt32, tdms.TypeInt64,
+		tdms.TypeUint8, tdms.TypeUint16, tdms.TypeUint32, tdms.TypeUint64,
+		tdms.TypeFloat32, tdms.TypeFloat64,
+		tdms.TypeFloat32WithUnit, tdms.TypeFloat64WithUnit:
+		return true
+	default:
+		return false
+	}
+}
+
+func applyWaveform(o *Occurrence, ch *tdms.Channel) error {
+	if ch == nil {
+		return nil
+	}
+	start, ok := ch.StartTime()
+	if !ok {
+		return nil
+	}
+	inc := 0.0
+	if v, has := ch.Increment(); has {
+		inc = v
+	}
+	if math.IsNaN(inc) || math.IsInf(inc, 0) {
+		return fmt.Errorf("%w: wf_increment of %s", ErrArgument, ch.Path())
+	}
+	o.Timed = true
+	o.Source = TimeWaveform
+	o.Dt = inc
+	if ch.Len() == 0 {
+		return nil
+	}
+	lo, hi, err := waveformSpan(start, inc, ch.Len())
+	if err != nil {
+		return fmt.Errorf("%w: waveform time of %s", ErrArgument, ch.Path())
+	}
+	o.Start, o.Last = lo, hi
+	return nil
+}
+
+func applySpan(o *Occurrence, times []time.Time) {
+	if len(times) == 0 {
+		return
+	}
+	o.Start, o.Last = times[0], times[0]
+	for _, ts := range times[1:] {
+		if ts.Before(o.Start) {
+			o.Start = ts
+		}
+		if ts.After(o.Last) {
+			o.Last = ts
+		}
+	}
+	if dt, ok := uniformDt(times); ok {
+		o.Dt = dt
+	}
+}
+
+func uniformDt(times []time.Time) (float64, bool) {
+	if len(times) < 2 {
+		return 0, false
+	}
+	dt := times[1].Sub(times[0]).Seconds()
+	if dt <= 0 {
+		return 0, false
+	}
+	for i := 2; i < len(times); i++ {
+		step := times[i].Sub(times[i-1]).Seconds()
+		if math.Abs(step-dt) > 1e-9 {
+			return 0, false
+		}
+	}
+	return dt, true
+}
+
+func waveformSpan(start time.Time, inc float64, n int) (time.Time, time.Time, error) {
+	t0, err := waveformAt(start, inc, 0)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if n <= 1 {
+		return t0, t0, nil
+	}
+	tN, err := waveformAt(start, inc, n-1)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if tN.Before(t0) {
+		return tN, t0, nil
+	}
+	return t0, tN, nil
+}
+
+func waveformAt(start time.Time, inc float64, i int) (time.Time, error) {
+	if i == 0 || inc == 0 {
+		return start, nil
+	}
+	return secondsToTime(start, float64(i)*inc)
+}
+
+func secondsToTime(epoch time.Time, sec float64) (time.Time, error) {
+	if math.IsNaN(sec) || math.IsInf(sec, 0) {
+		return time.Time{}, fmt.Errorf("%w: timestamp seconds are not finite", ErrArgument)
+	}
+	ns := sec * 1e9
+	if ns >= float64(math.MaxInt64) || ns <= float64(math.MinInt64) {
+		return time.Time{}, fmt.Errorf("%w: timestamp seconds do not fit in time.Time", ErrArgument)
+	}
+	return epoch.Add(time.Duration(math.Round(ns))), nil
+}
