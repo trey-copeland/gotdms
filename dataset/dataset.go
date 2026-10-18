@@ -134,9 +134,8 @@ type Gap struct {
 }
 
 // Series is a merged channel read. Times is nil when Timed is false.
-// Origin is the dataset origin used by RelativeTimes. Dt is the shared
-// positive increment when every contributing sample has that increment,
-// else 0.
+// Basis is the time RelativeTimes subtracts. Dt is the shared positive
+// increment when every contributing sample has that increment, else 0.
 type Series struct {
 	Name        string
 	Group       string
@@ -148,13 +147,30 @@ type Series struct {
 	Y           []float64
 	Times       []time.Time
 	Gaps        []Gap
-	Origin      time.Time
+	// Basis is the anchor for RelativeTimes: sample time minus Basis, in
+	// seconds. It is the dataset basis, or the WithReadBasis value for the
+	// call that returned this series. It is not the first sample of the
+	// series or of the window. Resample copies it. RelativeTimesFrom does
+	// not change it.
+	Basis time.Time
 }
 
-// RelativeTimes returns seconds since Origin for a timed series.
+// RelativeTimes returns seconds since Basis for a timed series.
+// A sample before Basis is negative. Nothing is clamped or shifted so that
+// the first sample is zero.
+//
 // An untimed series returns the sample indexes 0, 1, 2, … as float64.
-// Origin is ignored in that case. The two are distinguished by Timed.
+// Basis does not apply. Timed distinguishes the two.
 func (s Series) RelativeTimes() []float64 {
+	return s.RelativeTimesFrom(s.Basis)
+}
+
+// RelativeTimesFrom returns seconds since basis without changing s.
+// For a timed series each value is sample_time.Sub(basis).Seconds(): zero
+// only at basis, positive after, negative before. basis need not be a sample.
+// An untimed series ignores basis and returns sample indexes, the same as
+// RelativeTimes.
+func (s Series) RelativeTimesFrom(basis time.Time) []float64 {
 	if !s.Timed {
 		out := make([]float64, len(s.Y))
 		for i := range out {
@@ -164,7 +180,7 @@ func (s Series) RelativeTimes() []float64 {
 	}
 	out := make([]float64, len(s.Times))
 	for i, ts := range s.Times {
-		out[i] = ts.Sub(s.Origin).Seconds()
+		out[i] = ts.Sub(basis).Seconds()
 	}
 	return out
 }
@@ -183,17 +199,17 @@ const (
 // Dataset is an indexed set of TDMS files. It is safe for concurrent reads
 // after Open returns. Open closes every file it scans.
 type Dataset struct {
-	files  []string
-	occ    []Occurrence
-	origin time.Time
-	opt    options
+	files []string
+	occ   []Occurrence
+	basis time.Time
+	opt   options
 }
 
 type options struct {
 	workers     int
 	readWorkers int
-	origin      time.Time
-	originSet   bool
+	basis       time.Time
+	basisSet    bool
 	epoch       time.Time
 	epochSet    bool
 	overlap     OverlapPolicy
@@ -233,14 +249,17 @@ func WithReadWorkers(n int) Option {
 	}
 }
 
-// WithOrigin sets the zero of RelativeTimes. Without it, the origin is the
-// earliest Start among timed occurrences. An explicit origin may lie after
-// some samples, which makes those relative times negative. This is not the
-// epoch of numeric timestamp values; that is WithNumericEpoch.
-func WithOrigin(t time.Time) Option {
+// WithBasisTime sets the basis subtracted by RelativeTimes. Without it, the
+// basis is the earliest Start among timed occurrences in the catalog, chosen
+// once at Open. A window does not move it. A sample before the basis has a
+// negative relative time; a sample after it is positive. The zero Time is a
+// real basis when this option is passed. This is not the epoch of numeric
+// timestamp values; that is WithNumericEpoch. WithReadBasis overrides it for
+// one call.
+func WithBasisTime(t time.Time) Option {
 	return func(o *options) {
-		o.origin = t
-		o.originSet = true
+		o.basis = t
+		o.basisSet = true
 	}
 }
 
@@ -373,9 +392,9 @@ func OpenFiles(paths []string, opts ...Option) (*Dataset, error) {
 		return occ[i].Name < occ[j].Name
 	})
 	ds := &Dataset{files: abs, occ: occ, opt: opt}
-	ds.origin = opt.origin
-	if !opt.originSet {
-		ds.origin = earliest(occ)
+	ds.basis = opt.basis
+	if !opt.basisSet {
+		ds.basis = earliest(occ)
 	}
 	return ds, nil
 }
@@ -395,8 +414,44 @@ func OpenGlob(dir, pattern string, opts ...Option) (*Dataset, error) {
 	return OpenFiles(matches, opts...)
 }
 
-// Origin is the zero of RelativeTimes.
-func (d *Dataset) Origin() time.Time { return d.origin }
+// Basis is the default anchor for RelativeTimes. A read uses it unless
+// WithReadBasis overrides that call. It does not change when a window crops
+// the samples.
+func (d *Dataset) Basis() time.Time { return d.basis }
+
+// ReadOption configures one Read, ReadWindow, or ReadMany call.
+// It does not change the dataset.
+type ReadOption func(*readOptions)
+
+type readOptions struct {
+	basis    time.Time
+	basisSet bool
+}
+
+// WithReadBasis sets the basis for this call only. ReadMany applies t to
+// every returned series. A later WithReadBasis on the same call replaces the
+// earlier one. The dataset basis is unchanged. Relative time is the sample
+// time minus t, in seconds, and is negative before t. The zero Time is a real
+// basis when this option is passed.
+func WithReadBasis(t time.Time) ReadOption {
+	return func(o *readOptions) {
+		o.basis = t
+		o.basisSet = true
+	}
+}
+
+func (d *Dataset) basisFor(opts []ReadOption) time.Time {
+	var cfg readOptions
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	if cfg.basisSet {
+		return cfg.basis
+	}
+	return d.basis
+}
 
 // Files returns the absolute paths that were indexed, in input order after
 // de-duplication. Glob results are sorted by filepath.Glob.
@@ -454,33 +509,36 @@ func (d *Dataset) Match(pattern string) ([]Occurrence, error) {
 }
 
 // Read merges every file of the channel and returns all samples.
-// Untimed channels are concatenated in file-path order.
-func (d *Dataset) Read(sel Selector) (Series, error) {
-	return d.read(sel, time.Time{}, time.Time{}, false)
+// Untimed channels are concatenated in file-path order. opts may include
+// WithReadBasis; the dataset basis is used otherwise.
+func (d *Dataset) Read(sel Selector, opts ...ReadOption) (Series, error) {
+	return d.read(sel, time.Time{}, time.Time{}, false, d.basisFor(opts))
 }
 
 // ReadWindow merges the channel and keeps samples with start <= t < end.
 // Untimed channels return ErrUntimed. Files whose span misses the window are
 // not opened. A timestamp axis that steps backwards returns ErrMonotonic.
-func (d *Dataset) ReadWindow(sel Selector, start, end time.Time) (Series, error) {
+// The basis is not moved to the first sample inside the window.
+func (d *Dataset) ReadWindow(sel Selector, start, end time.Time, opts ...ReadOption) (Series, error) {
 	if !end.After(start) {
 		return Series{}, fmt.Errorf("%w: window end must be after start", ErrArgument)
 	}
-	return d.read(sel, start, end, true)
+	return d.read(sel, start, end, true, d.basisFor(opts))
 }
 
 // ReadMany reads each selector over the same half-open window [start, end).
-// Every series uses this dataset's Origin, so RelativeTimes line up.
-// Selectors run with WithReadWorkers concurrency. The result order matches
-// sels. One untimed selector fails the call with ErrUntimed.
-func (d *Dataset) ReadMany(sels []Selector, start, end time.Time) ([]Series, error) {
+// Every series uses one basis: WithReadBasis if passed, otherwise the dataset
+// basis. Selectors run with WithReadWorkers concurrency. The result order
+// matches sels. One untimed selector fails the call with ErrUntimed.
+func (d *Dataset) ReadMany(sels []Selector, start, end time.Time, opts ...ReadOption) ([]Series, error) {
 	if !end.After(start) {
 		return nil, fmt.Errorf("%w: window end must be after start", ErrArgument)
 	}
+	basis := d.basisFor(opts)
 	out := make([]Series, len(sels))
 	errs := make([]error, len(sels))
 	run(d.opt.readWorkers, len(sels), func(i int) {
-		out[i], errs[i] = d.read(sels[i], start, end, true)
+		out[i], errs[i] = d.read(sels[i], start, end, true, basis)
 	})
 	for _, err := range errs {
 		if err != nil {
@@ -490,7 +548,7 @@ func (d *Dataset) ReadMany(sels []Selector, start, end time.Time) ([]Series, err
 	return out, nil
 }
 
-func (d *Dataset) read(sel Selector, start, end time.Time, window bool) (Series, error) {
+func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis time.Time) (Series, error) {
 	hits, err := d.resolve(sel)
 	if err != nil {
 		return Series{}, err
@@ -547,7 +605,7 @@ func (d *Dataset) read(sel Selector, start, end time.Time, window bool) (Series,
 	} else if len(hits) > 0 {
 		merged.Group = hits[0].Group
 	}
-	merged.Origin = d.origin
+	merged.Basis = basis
 	if len(hits) > 0 {
 		merged.Source = hits[0].Source
 		merged.Timed = hits[0].Timed

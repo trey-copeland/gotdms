@@ -425,6 +425,9 @@ func (w *wrapped) Unwrap() error { return w.err }
 // Gap are omitted. The result can be shorter than the grid. Values are not
 // extrapolated. An untimed series returns ErrUntimed. dt must be positive.
 // A grid of more than 10 million points returns ErrArgument.
+//
+// The result keeps absolute Times and copies Basis. RelativeTimes is still
+// sample time minus that basis, not seconds since the first grid point.
 func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Series, error) {
 	if !s.Timed {
 		return Series{}, errWrap(ErrUntimed, "resample")
@@ -447,7 +450,7 @@ func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Serie
 		IsTimestamp: s.IsTimestamp,
 		Source:      s.Source,
 		Dt:          dt,
-		Origin:      s.Origin,
+		Basis:       s.Basis,
 		Y:           []float64{},
 		Times:       []time.Time{},
 	}

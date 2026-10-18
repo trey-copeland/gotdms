@@ -414,8 +414,8 @@ func TestDifferentRatesSameWindow(t *testing.T) {
 	if !sameFloats(got[0].Y, []float64{1, 2}) || !sameFloats(got[1].Y, []float64{1, 1.5, 2}) {
 		t.Fatalf("Y = %v %v", got[0].Y, got[1].Y)
 	}
-	if !got[0].Origin.Equal(ds.Origin()) || !got[1].Origin.Equal(got[0].Origin) {
-		t.Fatal("origins differ")
+	if !got[0].Basis.Equal(ds.Basis()) || !got[1].Basis.Equal(got[0].Basis) {
+		t.Fatal("bases differ")
 	}
 	rel0 := got[0].RelativeTimes()
 	if len(rel0) != 2 || math.Abs(rel0[0]-1) > 1e-9 || math.Abs(rel0[1]-2) > 1e-9 {
@@ -448,40 +448,145 @@ func TestUntimed(t *testing.T) {
 	if !sameFloats(s.RelativeTimes(), []float64{0, 1, 2, 3}) {
 		t.Fatalf("rel = %v", s.RelativeTimes())
 	}
+	anchored := s.RelativeTimesFrom(epoch.Add(time.Hour))
+	if !sameFloats(anchored, []float64{0, 1, 2, 3}) || !sameFloats(s.Y, []float64{1, 2, 3, 4}) {
+		t.Fatalf("untimed basis changed Y=%v rel=%v", s.Y, anchored)
+	}
 	_, err = ds.ReadWindow(Selector{Name: "raw"}, epoch, epoch.Add(time.Hour))
 	if !errors.Is(err, ErrUntimed) {
 		t.Fatalf("window err = %v", err)
 	}
 }
 
-func TestRelativeOrigin(t *testing.T) {
+func TestBasis(t *testing.T) {
 	dir := t.TempDir()
-	writePair(t, filepath.Join(dir, "early.tdms"), "acq", "early", []float64{0}, []float64{1})
-	writePair(t, filepath.Join(dir, "late.tdms"), "acq", "late", []float64{10, 11}, []float64{2, 3})
+	writeSpecs(t, filepath.Join(dir, "run.tdms"), []spec{
+		{group: "slow", name: "Time", y: []float64{0, 1, 2, 3}},
+		{group: "slow", name: "ai0", y: []float64{0, 1, 2, 3}},
+		{group: "fast", name: "Time", y: []float64{0, 0.5, 1, 1.5, 2, 2.5, 3}},
+		{group: "fast", name: "ai0", y: []float64{0, 0.5, 1, 1.5, 2, 2.5, 3}},
+	})
 	ds := openAt(t, dir)
-	if !ds.Origin().Equal(epoch) {
-		t.Fatalf("origin = %s", ds.Origin())
+	if !ds.Basis().Equal(epoch) {
+		t.Fatalf("default basis = %s", ds.Basis())
 	}
-	s, err := ds.Read(Selector{Name: "late"})
+
+	// A window does not re-zero at its first sample. Default basis stays the
+	// earliest catalog sample, which is before this window.
+	win, err := ds.ReadWindow(Selector{Name: "ai0", Group: "slow"}, epoch.Add(2*time.Second), epoch.Add(4*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rel := s.RelativeTimes()
-	if len(rel) != 2 || math.Abs(rel[0]-10) > 1e-9 || math.Abs(rel[1]-11) > 1e-9 {
-		t.Fatalf("rel = %v", rel)
+	if !sameFloats(win.Y, []float64{2, 3}) || !near(win.RelativeTimes(), []float64{2, 3}) {
+		t.Fatalf("window rel = %v Y=%v", win.RelativeTimes(), win.Y)
 	}
-	origin := epoch.Add(30 * time.Second)
-	ds2, err := OpenGlob(dir, "*.tdms", WithTimestampChannelName("Time"), WithNumericEpoch(epoch), WithOrigin(origin))
+	if !win.Basis.Equal(ds.Basis()) {
+		t.Fatal("window moved the basis")
+	}
+
+	// Basis before the window: the first relative time is positive.
+	before := epoch.Add(-500 * time.Millisecond)
+	early, err := ds.ReadWindow(Selector{Name: "ai0", Group: "slow"}, epoch.Add(time.Second), epoch.Add(3*time.Second), WithReadBasis(before))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err = ds2.Read(Selector{Name: "early"})
+	if !early.Basis.Equal(before) || !near(early.RelativeTimes(), []float64{1.5, 2.5}) {
+		t.Fatalf("before rel = %v basis=%s", early.RelativeTimes(), early.Basis)
+	}
+	if early.RelativeTimes()[0] <= 0 {
+		t.Fatal("expected first relative > 0")
+	}
+
+	// Basis between samples, inside the window: relatives cross zero.
+	mid := epoch.Add(1500 * time.Millisecond)
+	cross, err := ds.ReadWindow(Selector{Name: "ai0", Group: "slow"}, epoch, epoch.Add(4*time.Second), WithReadBasis(mid))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rel = s.RelativeTimes()
-	if len(rel) != 1 || math.Abs(rel[0]-(-30)) > 1e-9 {
-		t.Fatalf("explicit rel = %v", rel)
+	if !near(cross.RelativeTimes(), []float64{-1.5, -0.5, 0.5, 1.5}) {
+		t.Fatalf("cross rel = %v", cross.RelativeTimes())
+	}
+
+	// Basis after every sample: all relatives are negative.
+	after := epoch.Add(10 * time.Second)
+	neg, err := ds.Read(Selector{Name: "ai0", Group: "slow"}, WithReadBasis(after))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range neg.RelativeTimes() {
+		if r >= 0 {
+			t.Fatalf("expected negative, got %v", neg.RelativeTimes())
+		}
+	}
+	if !near(neg.RelativeTimes(), []float64{-10, -9, -8, -7}) {
+		t.Fatalf("after rel = %v", neg.RelativeTimes())
+	}
+
+	// The override does not stick. The next read uses the dataset basis.
+	if !ds.Basis().Equal(epoch) {
+		t.Fatal("dataset basis changed")
+	}
+	again, err := ds.Read(Selector{Name: "ai0", Group: "slow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Basis.Equal(epoch) || !near(again.RelativeTimes(), []float64{0, 1, 2, 3}) {
+		t.Fatalf("again rel = %v basis=%s", again.RelativeTimes(), again.Basis)
+	}
+
+	// ReadMany applies one override to channels sampled at different rates.
+	many, err := ds.ReadMany(
+		[]Selector{{Name: "ai0", Group: "slow"}, {Name: "ai0", Group: "fast"}},
+		epoch, epoch.Add(3*time.Second),
+		WithReadBasis(mid),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !many[0].Basis.Equal(mid) || !many[1].Basis.Equal(mid) {
+		t.Fatal("ReadMany bases differ")
+	}
+	if !near(many[0].RelativeTimes(), []float64{-1.5, -0.5, 0.5}) {
+		t.Fatalf("slow rel = %v", many[0].RelativeTimes())
+	}
+	if !near(many[1].RelativeTimes(), []float64{-1.5, -1, -0.5, 0, 0.5, 1}) {
+		t.Fatalf("fast rel = %v", many[1].RelativeTimes())
+	}
+
+	// RelativeTimesFrom re-anchors and leaves the series alone.
+	from := cross.RelativeTimesFrom(epoch)
+	if !near(from, []float64{0, 1, 2, 3}) {
+		t.Fatalf("from = %v", from)
+	}
+	if !cross.Basis.Equal(mid) || !near(cross.RelativeTimes(), []float64{-1.5, -0.5, 0.5, 1.5}) {
+		t.Fatalf("series mutated: basis=%s rel=%v", cross.Basis, cross.RelativeTimes())
+	}
+
+	// A dataset-level basis after the data makes a plain read negative,
+	// and it is independent of WithNumericEpoch.
+	lateBasis := epoch.Add(30 * time.Second)
+	ds2, err := OpenGlob(dir, "*.tdms", WithTimestampChannelName("Time"), WithNumericEpoch(epoch), WithBasisTime(lateBasis))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ds2.Basis().Equal(lateBasis) {
+		t.Fatalf("explicit basis = %s", ds2.Basis())
+	}
+	s, err := ds2.Read(Selector{Name: "ai0", Group: "slow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(s.RelativeTimes(), []float64{-30, -29, -28, -27}) {
+		t.Fatalf("dataset basis rel = %v", s.RelativeTimes())
+	}
+
+	// Resample keeps the same basis. The first grid point is not forced to 0.
+	rs, err := cross.Resample(epoch, epoch.Add(3*time.Second), 1, InterpLinear)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rs.Basis.Equal(mid) || !near(rs.RelativeTimes(), []float64{-1.5, -0.5, 0.5}) {
+		t.Fatalf("resample basis=%s rel=%v", rs.Basis, rs.RelativeTimes())
 	}
 }
 
@@ -892,6 +997,18 @@ func sameFloats(got, want []float64) bool {
 	}
 	for i := range got {
 		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func near(got, want []float64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if math.Abs(got[i]-want[i]) > 1e-9 {
 			return false
 		}
 	}

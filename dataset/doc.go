@@ -23,9 +23,17 @@
 // WithNumericEpoch. There is no default epoch. Open returns ErrArgument if a
 // declared timestamp channel is numeric and WithNumericEpoch was not set,
 // because a bare 0.0 is not the Unix epoch unless the caller says so. Pass
-// time.Unix(0, 0).UTC() when the numbers are Unix seconds. The dataset origin
-// used by RelativeTimes is separate: it is the earliest timed sample, or
-// WithOrigin.
+// time.Unix(0, 0).UTC() when the numbers are Unix seconds.
+//
+// Relative time is sample time minus a basis, in seconds. It is zero only at
+// the basis, positive after it, and negative before it. WithBasisTime sets
+// the dataset basis; if omitted, the basis is the earliest timed sample in
+// the catalog, fixed at Open. A window does not move it, so the first sample
+// of a cropped read is not forced to zero. WithReadBasis overrides the basis
+// for one Read, ReadWindow, or ReadMany, and ReadMany uses that one value for
+// every series. Series.Basis is the basis that call stored. RelativeTimes
+// uses it. RelativeTimesFrom computes against any other time without changing
+// the series. An untimed series ignores the basis and returns sample indexes.
 //
 // Timestamp values must be non-decreasing inside a file. A step backwards
 // returns ErrMonotonic from Read, ReadWindow, and ReadMany. Equal timestamps

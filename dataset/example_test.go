@@ -40,10 +40,11 @@ func Example() {
 
 	start := epoch.Add(10 * time.Second)
 	end := epoch.Add(13 * time.Second)
+	trigger := epoch.Add(10500 * time.Millisecond)
 	series, err := ds.ReadMany([]dataset.Selector{
 		{Name: "ai0"},
 		{Name: "ai1"},
-	}, start, end)
+	}, start, end, dataset.WithReadBasis(trigger))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -61,9 +62,9 @@ func Example() {
 	// files 100
 	// ai0 count 100 group acquisition
 	// ai0 [10 11 12]
-	// ai0 rel 10.000 11.000 12.000
+	// ai0 rel -0.500 0.500 1.500
 	// ai1 [100 110 120]
-	// ai1 rel 10.000 11.000 12.000
+	// ai1 rel -0.500 0.500 1.500
 }
 
 func writeSample(path string, i int) error {
