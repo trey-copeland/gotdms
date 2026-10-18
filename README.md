@@ -277,6 +277,10 @@ for _, s := range series {
 
 `Example` in package `dataset` is the compile-checked copy: 100 files, a global timestamp channel, find without a group, one window, and relative times against an explicit trigger. Benchmarks run only under `go test -bench`. `BenchmarkCatalog` indexes 100 one-sample files. `BenchmarkCatalogSharedClock` and `BenchmarkReadManySharedClock` use a 2^20-sample clock. `BenchmarkReadWindowTail` times the same clock's last 64 samples and still decodes the prefix; it is the cost of having no core range read, not a fast path.
 
+## Python
+
+`python/` is the client that lets a Python and pandas tool stop importing npTDMS. It launches `gotdms-bridge` (`bridge/`), a separate Go module that links Apache Arrow. The core module stays dependency-free. Interactive sessions and `gotdms-bridge convert` both return raw samples unless scaling is requested. The mapping, the LGPL-3.0 and MIT license note, and the remaining gaps are in [docs/nptdms-migration.md](docs/nptdms-migration.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
