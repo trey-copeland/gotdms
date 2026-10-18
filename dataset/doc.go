@@ -84,10 +84,11 @@
 // slices are owned by the Series. The paired data channel is decoded in full
 // on read. Waveform fallback does not load samples to build the span. main
 // exports SegmentCount and Len, not per-segment sample bounds, so a waveform
-// window cannot skip a leading segment. Cursor starts at the first sample,
-// batches before the window are copied out and the rest discarded, and the
-// walk stops at the window. A window at the end of a long channel still
-// decodes the prefix. Sample i is StartTime plus i times Increment, rounded
+// window cannot skip a leading segment. Cursor starts at the first sample.
+// Batches before the window are decoded and discarded, values inside the
+// window are copied out (a cursor batch is only valid until the next Next),
+// and the walk stops at the window. A window at the end of a long channel
+// still decodes the prefix. Sample i is StartTime plus i times Increment, rounded
 // to the nearest nanosecond in one multiply.
 //
 // Waveform properties are the latest wf_start_time and wf_increment on the
@@ -95,7 +96,8 @@
 // segment that rewrites those properties is not reconstructed.
 //
 // Resample is opt-in. It never extrapolates past a series, and it omits grid
-// points that lie inside a reported gap.
+// points that lie inside a reported gap. dt is rounded to nanoseconds. A step
+// that rounds below 1ns returns ErrArgument instead of spinning.
 //
 // Catalog and reads use a bounded worker pool (WithWorkers, WithReadWorkers).
 // ReadMany's pool is the whole call: it does not start another pool per
