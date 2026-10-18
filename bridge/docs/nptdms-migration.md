@@ -1,6 +1,6 @@
 # From npTDMS to gotdms
 
-This is the post-analysis path for a Python tool that uses numpy and pandas and today imports [npTDMS](https://github.com/adamreeve/npTDMS). The tool stays in Python. `gotdms-bridge` reads TDMS. This package does not import npTDMS.
+This is the post-analysis path for a Python tool that uses numpy and Polars and today imports [npTDMS](https://github.com/adamreeve/npTDMS). The tool stays in Python. `gotdms-bridge` reads TDMS. This package does not import npTDMS.
 
 This note is not legal advice. It records the licenses as published and the behavioral differences that matter when moving a call site.
 
@@ -11,19 +11,20 @@ npTDMS is distributed under the GNU Lesser General Public License, version 3.0 o
 - The repository ships that text as [`COPYING.LESSER`](https://github.com/adamreeve/npTDMS/blob/master/COPYING.LESSER).
 - [PyPI](https://pypi.org/project/npTDMS/) lists the project license as LGPL-3.0.
 
-gotdms, the `bridge` module, and the Python package in `python/` are MIT. The text is [`LICENSE`](../LICENSE) at the repository root. The Python package is the decoupling path: call sites depend on this MIT client and the MIT bridge instead of importing the LGPL-3.0 library.
+The gotdms core library and this bridge are MIT. This tree's text is [`LICENSE`](../LICENSE). numpy, used for the raw arrays, is BSD-3-Clause ([numpy's LICENSE.txt](https://github.com/numpy/numpy/blob/main/LICENSE.txt)). Polars, the dataframe layer, is MIT. pyarrow, the Arrow interchange, is Apache-2.0. The Python package is the decoupling path: call sites depend on this MIT client and the MIT bridge instead of importing the LGPL-3.0 library. This package does not depend on pandas.
 
 ## What you run
 
 Build the bridge from the separate Go module. That module is the only place Apache Arrow is linked. The core `github.com/trey-copeland/gotdms` module has no third-party requirements.
 
 ```bash
-cd bridge
+# From this project's root. While the tree still lives inside the gotdms
+# checkout, that root is the bridge/ directory.
 go build -o gotdms-bridge ./cmd/gotdms-bridge
 export GOTDMS_BRIDGE="$PWD/gotdms-bridge"
 ```
 
-The Python package needs numpy. Interactive reads and `load_bundle` need `pyarrow` (`gotdms[arrow]`). `as_dataframe` needs pandas (`gotdms[pandas]`).
+The Python package needs numpy. Interactive reads and `load_bundle` need `pyarrow` (`gotdms[arrow]`). `as_polars` needs Polars (`gotdms[polars]`). pyarrow is the interchange; Polars consumes Arrow natively. If a caller still wants a pandas object, Polars provides `frame.to_pandas()`. That conversion is not a dependency of this package.
 
 ## Two modes
 
@@ -38,14 +39,14 @@ Both modes return raw samples unless you set `scaled=True` or `--scaled`.
 | npTDMS | gotdms |
 | --- | --- |
 | `TdmsFile.read_metadata(path)` | `gotdms.open(...)` then `session.catalog()`, `find`, `search`. Data-channel samples are not decoded. Opening still reads declared timestamp channels so the dataset can learn each file's span. |
-| `TdmsFile.read(path)` | `gotdms.open(...)` then `session.read_all()` or `session.as_dataframe()`. |
+| `TdmsFile.read(path)` | `gotdms.open(...)` then `session.read_all()` or `session.as_polars()`. |
 | `tdms[group][channel]` | `session[group][channel]`. A bare `session.channel(name)` works only when the name is in one group. Two groups raise `AmbiguousChannelError`. |
 | `channel.properties` | `channel.properties`. Compared per file; `properties_match` is false when files disagree. |
 | `channel[:]` / `read_data(scaled=True)` | `channel.data()`. Raw. Pass `scaled=True` to apply an NI linear scale. |
 | `channel.raw_data` / `read_data(scaled=False)` | `channel.data()` with the default `scaled=False`. |
 | `channel.time_track(absolute_time=True)` | `channel.time_track(absolute_time=True)`, `numpy.datetime64[ns]`. |
 | `channel.time_track(absolute_time=False)` | `channel.time_track(absolute_time=False)` is seconds since the basis, not npTDMS's zero-at-first-sample track. See below. |
-| `as_dataframe(time_index=True, absolute_time=..., scaled_data=True)` | `as_dataframe(time="index", absolute_time=..., align="nptdms", scaled=True)`. Default `align` is `"strict"` and default `scaled` is `False`. |
+| `as_dataframe(time_index=True, absolute_time=..., scaled_data=True)` | `as_polars(time="column", absolute_time=..., align="nptdms", scaled=True)`. Polars has no row index, so the DatetimeIndex is a `time` column. Default `align` is `"strict"` and default `scaled` is `False`. |
 | `tdmsinfo` | No CLI inspector. Use `catalog` or the convert manifest. |
 | HDF5 export | Not provided. |
 
@@ -89,7 +90,7 @@ with gotdms.open(
     scaled = session["acq"]["ai1"].data(scaled=True)  # linear scale only
     times = session["acq"]["ai0"].time_track(absolute_time=True)
     relative = session["acq"]["ai0"].time_track(absolute_time=False)
-    frame = session.as_dataframe(time="index", absolute_time=True, align="strict")
+    frame = session.as_polars(time="column", absolute_time=True, align="strict")
     window = session.read_many(
         [{"name": "ai0", "group": "acq"}, {"name": "ai1", "group": "acq"}],
         start="2024-03-01T00:00:02Z",
@@ -105,7 +106,7 @@ with gotdms.open(["a.tdms"], timestamp_channel="Time", numeric_epoch="2024-03-01
     catalog = session.catalog()
 ```
 
-Batch, then one pandas load:
+Batch, then one Polars load:
 
 ```bash
 gotdms-bridge convert \
@@ -122,7 +123,7 @@ gotdms-bridge convert \
 import gotdms
 
 bundle = gotdms.load_bundle("bundle")
-frame = bundle.as_dataframe(time="column", align="strict")
+frame = bundle.as_polars(time="column", align="strict")
 ```
 
 ## Scaling
@@ -149,13 +150,29 @@ A window is half-open: `start <= t < end`. Pass both ends. A window on an untime
 
 `read_many` is the call to use for several channels. One response carries every channel's values and the shared `time_ns` column. Python does not loop per channel and does not decode the clock.
 
-## DataFrame alignment
+## Polars frames
 
-`align="strict"` is the default. Every channel must have the same time vector. The frame has no NaNs introduced by alignment. If the vectors differ, you get `AlignmentError`.
+`as_polars` returns a `polars.DataFrame`. Polars has no row index, so there is no `DatetimeIndex` and no `time="index"`. npTDMS `as_dataframe(time_index=True)` maps to a proper column: `time`, dtype `Datetime(ns, UTC)`, when `absolute_time` is true. `absolute_time=False` uses a `relative_s` float column of seconds since the basis. `time="none"` omits that column. Passing `time="index"` raises `ArgumentError` and points at the column.
 
-`align="nptdms"` outer-joins on the time values and inserts NaNs where a channel has no sample. That matches npTDMS `as_dataframe(time_index=True)`, which lines channels up on a time index. Duplicate timestamps inside one channel raise `AlignmentError` instead of repeating rows.
+`align="strict"` is the default. Every channel must share the same time vector. The frame is built column-wise and has no nulls introduced by alignment. If the vectors differ, you get `AlignmentError`.
 
-`time="column"` adds `time` (absolute) or `relative_s` (basis-relative). `time="index"` uses a `DatetimeIndex` named `time` for absolute time, or a float index named `relative_s` for basis-relative time. `time="none"` omits the axis. `as_dataframe` on a group or a whole session skips declared timestamp channels; they are the clock. Read them by name when you want the stored numbers.
+`align="nptdms"` is the opt-in that matches npTDMS index alignment. npTDMS outer-aligns channels on the time index and writes NaN where a channel has no sample. Polars expresses that as a full outer join on the time column, and the missing cells are null rather than NaN:
+
+```python
+left.join(right, on="time", how="full", coalesce=True).sort("time")
+```
+
+`as_polars(..., align="nptdms")` does that join across the selected channels and sorts by `time` (or by `relative_s`). Duplicate timestamps in one channel raise `AlignmentError` instead of repeating rows.
+
+A full join matches equal timestamps only. When two channels are close in time but not equal, the caller uses Polars' as-of join, which this package does not run for you:
+
+```python
+left.join_asof(right, on="time", strategy="backward")
+```
+
+`strategy` is `"backward"`, `"forward"`, or `"nearest"`. That is a different choice from npTDMS NaN alignment. Pick it at the call site when equal timestamps are the wrong match.
+
+`as_polars` on a group or a whole session skips declared timestamp channels; they are the clock. Read them by name when you want the stored numbers. A pandas object is one call on the result, `frame.to_pandas()`, and is not imported here.
 
 ## Batch bundle
 
@@ -179,7 +196,7 @@ Each `.arrow` file is one Arrow IPC stream with one record batch. The schema met
 
 ## Interactive frames
 
-`serve` reads and writes little-endian frames on stdin and stdout. The definition in code is `Frame` in `bridge/frame.go`.
+`serve` reads and writes little-endian frames on stdin and stdout. The definition in code is `Frame` in `frame.go`.
 
 ```text
 0   magic "GMDS"

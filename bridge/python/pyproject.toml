@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gotdms"
 version = "0.1.0"
-description = "MIT Python client for gotdms. The npTDMS-decoupling path for post-analysis in numpy and pandas."
+description = "MIT Python client for gotdms. The npTDMS-decoupling path for post-analysis in numpy and Polars."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
@@ -13,8 +13,8 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 arrow = ["pyarrow>=14"]
-pandas = ["pandas"]
-all = ["pyarrow>=14", "pandas"]
+polars = ["polars>=1.0"]
+all = ["pyarrow>=14", "polars>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

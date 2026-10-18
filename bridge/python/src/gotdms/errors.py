@@ -94,7 +94,7 @@ class MonotonicError(GotdmsError):
 
 
 class AlignmentError(GotdmsError):
-    """``as_dataframe`` could not align channels under the requested mode."""
+    """``as_polars`` could not align channels under the requested mode."""
 
     def __init__(self, message):
         super().__init__(message, "alignment")

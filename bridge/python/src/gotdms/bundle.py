@@ -6,7 +6,7 @@ Layout:
     data/0.arrow
     data/1.arrow
 
-``manifest.json`` is the self-description pandas needs: channel path, group,
+``manifest.json`` is the self-description a Polars load needs: channel path, group,
 data type, time basis, scale, and properties. Each ``.arrow`` file is one
 Arrow IPC stream with columns ``y`` and, when requested, ``time_ns`` and
 ``relative_s``. Samples are not CSV.
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .codec import Series, as_dataframe, decode_ipc
+from .codec import Series, as_polars, decode_ipc
 
 
 class Bundle:
@@ -30,19 +30,20 @@ class Bundle:
         self.basis = manifest.get("basis")
         self.format = manifest.get("format")
 
-    def as_dataframe(self, *, time="column", absolute_time=True, align="strict", channels=None):
-        """Same alignment rules as :meth:`gotdms.Session.as_dataframe`.
+    def as_polars(self, *, time="column", absolute_time=True, align="strict", channels=None):
+        """Same alignment rules as :meth:`gotdms.Session.as_polars`.
 
         The bundle is already scaled or not, according to the convert
         command. This method does not scale again. ``scaled`` is not a
         parameter here; re-run convert with ``--scaled`` when you want the
-        linear scale. npTDMS ``as_dataframe`` scales by default.
+        linear scale. npTDMS ``as_dataframe`` scales by default. Polars has
+        no row index, so time is a column.
         """
         selected = self.channels
         if channels is not None:
             wanted = set(channels)
             selected = [item for item in self.channels if item.name in wanted or f"{item.group}/{item.name}" in wanted]
-        return as_dataframe(selected, time=time, absolute_time=absolute_time, align=align)
+        return as_polars(selected, time=time, absolute_time=absolute_time, align=align)
 
 
 def load_bundle(path) -> Bundle:

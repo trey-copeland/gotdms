@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -11,12 +12,12 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-BRIDGE = ROOT / "bridge"
+sys.path.insert(0, str(ROOT / "python" / "src"))
 
 try:
-    import pandas as pd
-except ImportError:  # pragma: no cover - pandas is installed in this environment
-    pd = None
+    import polars as pl
+except ImportError:  # pragma: no cover - skipped only when polars is absent
+    pl = None
 
 
 class BridgeTest(unittest.TestCase):
@@ -26,7 +27,7 @@ class BridgeTest(unittest.TestCase):
         cls.bin = Path(cls.tmp.name) / "gotdms-bridge"
         subprocess.check_call(
             ["go", "build", "-o", str(cls.bin), "./cmd/gotdms-bridge"],
-            cwd=BRIDGE,
+            cwd=ROOT,
         )
         os.environ["GOTDMS_BRIDGE"] = str(cls.bin)
         demo = subprocess.check_output([str(cls.bin), "demo", "--out", cls.tmp.name], text=True)
@@ -119,54 +120,58 @@ class BridgeTest(unittest.TestCase):
             self.assertIn("Time", names)
             self.assertTrue(any(item["name"] == "ai1" for item in session.search("ai1")))
 
-    @unittest.skipIf(pd is None, "pandas is not installed")
-    def test_as_dataframe(self):
+    @unittest.skipIf(pl is None, "polars is not installed")
+    def test_as_polars(self):
         import gotdms
 
         with self.open_demo() as session:
-            frame = session.as_dataframe(
+            frame = session.as_polars(
                 channels=[session.channel("ai0", "acq"), session.channel("ai1", "acq")],
                 time="column",
                 absolute_time=True,
                 align="strict",
             )
-            self.assertIsInstance(frame, pd.DataFrame)
-            self.assertIn("time", frame.columns)
-            self.assertTrue(isinstance(frame.index, pd.RangeIndex))
+            self.assertIsInstance(frame, pl.DataFrame)
+            self.assertEqual(frame.schema["time"], pl.Datetime("ns", "UTC"))
+            self.assertEqual(frame.columns[0], "time")
             np.testing.assert_array_equal(frame["acq/ai0"].to_numpy(), [10, 11, 12, 13, 14, 15])
             np.testing.assert_array_equal(frame["acq/ai1"].to_numpy(), [1, 2, 3, 4, 5, 6])
-            self.assertFalse(frame["acq/ai0"].isna().any())
-            indexed = session["acq"].as_dataframe(time="index", absolute_time=True, align="strict")
-            self.assertIsInstance(indexed.index, pd.DatetimeIndex)
-            self.assertNotIn("Time", "".join(indexed.columns))
+            self.assertEqual(frame["acq/ai0"].null_count(), 0)
+            with self.assertRaises(gotdms.ArgumentError):
+                session.as_polars(channels=[session.channel("ai0", "acq")], time="index")
+            grouped = session["acq"].as_polars(time="column", absolute_time=True, align="strict")
+            self.assertNotIn("Time", "".join(grouped.columns))
+            self.assertEqual(grouped.schema["time"], pl.Datetime("ns", "UTC"))
 
             with self.assertRaises(gotdms.AlignmentError):
-                session.as_dataframe(
+                session.as_polars(
                     channels=[session.channel("ai0", "acq"), session.channel("volt", "fast")],
                     align="strict",
                 )
-            outer = session.as_dataframe(
+            outer = session.as_polars(
                 channels=[session.channel("ai0", "acq"), session.channel("volt", "fast")],
                 align="nptdms",
                 time="column",
             )
-            self.assertTrue(outer["acq/ai0"].isna().any())
-            self.assertTrue(outer["fast/volt"].isna().any())
-            at_half = outer.loc[outer["time"] == pd.Timestamp("2024-03-01T00:00:00.500000000Z")]
-            self.assertEqual(len(at_half), 1)
-            self.assertTrue(pd.isna(at_half["acq/ai0"].iloc[0]))
-            self.assertEqual(at_half["fast/volt"].iloc[0], 1)
+            self.assertGreater(outer["acq/ai0"].null_count(), 0)
+            self.assertGreater(outer["fast/volt"].null_count(), 0)
+            half = datetime(2024, 3, 1, 0, 0, 0, 500000, tzinfo=timezone.utc)
+            at_half = outer.filter(pl.col("time") == half)
+            self.assertEqual(at_half.height, 1)
+            self.assertTrue(at_half["acq/ai0"].is_null().item())
+            self.assertEqual(at_half["fast/volt"].item(), 1)
 
             with self.assertRaises(gotdms.AlignmentError):
-                session.channel("d", "dups").as_dataframe(align="nptdms")
+                session.channel("d", "dups").as_polars(align="nptdms")
 
-            relative = session.as_dataframe(
+            relative = session.as_polars(
                 channels=[session.channel("ai0", "acq")],
-                time="index",
+                time="column",
                 absolute_time=False,
                 basis=self.epoch + timedelta(seconds=1),
             )
-            self.assertEqual(list(relative.index), [float(v) for v in range(-1, 5)])
+            self.assertEqual(relative.columns[0], "relative_s")
+            self.assertEqual(relative["relative_s"].to_list(), [float(v) for v in range(-1, 5)])
 
     def test_convert_bundle(self):
         import gotdms
@@ -213,9 +218,10 @@ class BridgeTest(unittest.TestCase):
         self.assertTrue(bundle.basis)
         np.testing.assert_array_equal(bundle.channels[0].y, [12, 13, 14])
         np.testing.assert_array_equal(bundle.channels[0].relative_s, [1, 2, 3])
-        if pd is not None:
-            frame = bundle.as_dataframe(align="strict", time="column")
-            self.assertIn("time", frame.columns)
+        if pl is not None:
+            frame = bundle.as_polars(align="strict", time="column")
+            self.assertEqual(frame.columns[0], "time")
+            self.assertEqual(frame.schema["time"], pl.Datetime("ns", "UTC"))
             np.testing.assert_array_equal(frame["acq/ai1"].to_numpy(), [3, 4, 5])
 
 

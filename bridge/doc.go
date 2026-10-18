@@ -7,7 +7,8 @@
 // inside the frame payload. They are not JSON and not base64.
 //
 // Batch conversion writes a directory bundle: manifest.json plus one Arrow
-// IPC stream per channel. gotdms returns raw samples. A linear scale is
+// IPC stream per channel. The Python client turns those streams into Polars
+// frames. gotdms returns raw samples. A linear scale is
 // applied only when the request sets scaled, and only when every contributing
 // file has the same NI linear scale.
 package bridge

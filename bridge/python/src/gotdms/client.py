@@ -13,7 +13,7 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 
-from .codec import as_dataframe, series_from_parts, split_payload, write_frame, read_frame
+from .codec import as_polars, series_from_parts, split_payload, write_frame, read_frame
 from .errors import (
     AmbiguousChannelError,
     ArgumentError,
@@ -64,7 +64,8 @@ class Session:
     ``TdmsFile.read_metadata`` maps to :meth:`open` and :meth:`catalog`.
     Those calls do not decode data-channel samples. Opening still asks the
     dataset layer to read declared timestamp channels so it can learn each
-    file's span. ``TdmsFile.read`` maps to :meth:`open` plus :meth:`read_all`.
+    file's span. ``TdmsFile.read`` maps to :meth:`open` plus :meth:`read_all` or
+    :meth:`as_polars`.
 
     The binary is not safe to share across threads. This class locks the
     pipe so one session is still safe to call from several threads.
@@ -296,7 +297,7 @@ class Session:
         """
         return self.read_many(self._data_channels(), **kwargs)
 
-    def as_dataframe(
+    def as_polars(
         self,
         channels=None,
         group: str | None = None,
@@ -309,11 +310,15 @@ class Session:
         end=None,
         basis=None,
     ):
-        """DataFrame for a channel list, one group, or the whole set.
+        """Polars frame for a channel list, one group, or the whole set.
 
-        See :func:`gotdms.codec.as_dataframe` for alignment. ``scaled`` is
-        forwarded to the read and defaults to False, unlike npTDMS
-        ``as_dataframe(scaled_data=True)``.
+        Polars has no row index. npTDMS ``time_index=True`` (a DatetimeIndex)
+        is the ``time`` column produced by ``time="column"``. See
+        :func:`gotdms.codec.as_polars` for the strict and full-join alignment.
+        ``scaled`` is forwarded to the read and defaults to False, unlike
+        npTDMS ``as_dataframe(scaled_data=True)``. A pandas object, if you
+        still want one, is ``frame.to_pandas()`` on the result. This package
+        does not depend on pandas.
         """
         if channels is None:
             if group is None:
@@ -331,7 +336,7 @@ class Session:
             scaled=scaled,
             basis=basis,
         )
-        return as_dataframe(series, time=time, absolute_time=absolute_time, align=align)
+        return as_polars(series, time=time, absolute_time=absolute_time, align=align)
 
     def _data_channels(self):
         seen = set()
@@ -411,9 +416,9 @@ class Group:
             if item.get("name") == self.name
         ]
 
-    def as_dataframe(self, **kwargs):
-        """Data channels in this group. Timestamp channels are omitted."""
-        return self.session.as_dataframe(group=self.name, **kwargs)
+    def as_polars(self, **kwargs):
+        """Data channels in this group, as a Polars frame. Timestamp channels are omitted."""
+        return self.session.as_polars(group=self.name, **kwargs)
 
     def _data_channels(self):
         seen = set()
@@ -506,15 +511,15 @@ class Channel:
         series = self.session.read(self.name, self.group, absolute=True, relative=True, **kwargs)
         return series.time_track(absolute_time)
 
-    def as_dataframe(self, **kwargs):
-        return self.session.as_dataframe(channels=[self], **kwargs)
+    def as_polars(self, **kwargs):
+        return self.session.as_polars(channels=[self], **kwargs)
 
 
 def open(paths=None, *, binary=None, **kwargs) -> Session:
     """Open a dataset. Close it with :meth:`Session.close` or a ``with`` block.
 
     This is the eager-session entry. It corresponds to ``TdmsFile.read`` only
-    after you call :meth:`Session.read_all` or :meth:`Session.as_dataframe`.
+    after you call :meth:`Session.read_all` or :meth:`Session.as_polars`.
     :meth:`Session.open` itself is the metadata step, like
     ``TdmsFile.read_metadata``, except declared timestamp channels are read
     to compute the span.

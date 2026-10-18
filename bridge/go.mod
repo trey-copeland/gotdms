@@ -23,4 +23,8 @@ require (
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 )
 
+// In this checkout the parent directory is the gotdms core module.
+// After this tree is extracted as its own repository, that parent is gone.
+// .github/workflows/ci.yml rewrites the replace onto a gotdms checkout.
+// Until then, `../` is what `go test` in this directory uses.
 replace github.com/trey-copeland/gotdms => ../

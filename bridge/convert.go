@@ -36,7 +36,7 @@ type ConvertOptions struct {
 	OutDir            string
 }
 
-// Convert writes a directory bundle pandas can open with one call.
+// Convert writes a directory bundle Polars can open with one call.
 //
 //	manifest.json
 //	data/0.arrow

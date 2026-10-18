@@ -142,28 +142,40 @@ def series_from_parts(metas: list, parts: list[bytes]) -> list[Series]:
     return out
 
 
-def as_dataframe(series: list[Series], *, time: str = "column", absolute_time: bool = True, align: str = "strict"):
-    """Build one DataFrame from series that were returned together.
+def as_polars(series: list[Series], *, time: str = "column", absolute_time: bool = True, align: str = "strict"):
+    """Build one Polars DataFrame from series that were returned together.
 
-    ``time`` is ``"column"`` (default), ``"index"``, or ``"none"``.
-    ``absolute_time=True`` uses absolute timestamps. ``False`` uses
-    basis-relative seconds, not npTDMS's zero-at-first-sample axis.
+    Polars has no row index. npTDMS ``as_dataframe(time_index=True)`` puts
+    time in a ``DatetimeIndex``. The same idea here is a real column:
+    ``time`` (``Datetime(ns, UTC)``) when ``absolute_time`` is true, or
+    ``relative_s`` (seconds since the basis) when it is false. ``time="column"``
+    is that column. ``time="none"`` omits it. ``time="index"`` is rejected.
+
+    ``absolute_time=False`` is basis-relative seconds, not npTDMS's
+    zero-at-first-sample axis.
 
     ``align="strict"`` requires identical time vectors and does not insert
-    NaNs. ``align="nptdms"`` outer-joins on time and inserts NaNs where a
-    channel has no sample, which is the npTDMS ``as_dataframe(time_index=True)``
-    behavior. Duplicate timestamps in one channel raise AlignmentError
-    instead of repeating rows.
+    nulls. ``align="nptdms"`` is an explicit full outer join on that time
+    column (``how="full", coalesce=True``), which is how npTDMS lined channels
+    up on an index and filled gaps with NaN. Polars inserts null, not NaN.
+    The joined frame is sorted by the time column. Duplicate timestamps in
+    one channel raise AlignmentError instead of repeating rows.
 
-    Columns are ``group/name``. The caller chooses scaling before the read;
-    this function does not scale.
+    Timestamps that are close but not equal do not match. That is a
+    ``DataFrame.join_asof`` on the ``time`` column, which this helper does
+    not do. Columns are ``group/name``. Scaling happens on the read, not here.
     """
     try:
-        import pandas as pd
+        import polars as pl
     except ImportError as exc:
-        raise GotdmsError("pandas is required for as_dataframe; install gotdms[pandas]") from exc
-    if time not in ("column", "index", "none"):
-        raise ArgumentError("time must be column, index, or none")
+        raise GotdmsError("polars is required for as_polars; install gotdms[polars]") from exc
+    if time == "index":
+        raise ArgumentError(
+            "Polars has no row index. npTDMS time_index=True is the 'time' column "
+            "from time='column', or 'relative_s' when absolute_time is false"
+        )
+    if time not in ("column", "none"):
+        raise ArgumentError("time must be column or none")
     if align not in ("strict", "nptdms"):
         raise ArgumentError("align must be strict or nptdms")
     if not series:
@@ -179,41 +191,41 @@ def as_dataframe(series: list[Series], *, time: str = "column", absolute_time: b
                 raise GotdmsError(f"{item.group}/{item.name} has no relative time")
             keys.append(np.asarray(item.relative_s, dtype=np.float64))
     names = [f"{item.group}/{item.name}" for item in series]
+    key_name = "time" if absolute_time else "relative_s"
     if align == "strict":
         for key in keys[1:]:
             if not np.array_equal(keys[0], key):
                 raise AlignmentError(
-                    "channels do not share a time vector; pass align='nptdms' to insert NaNs"
+                    "channels do not share a time vector; pass align='nptdms' for a full join"
                 )
-        frame = pd.DataFrame({names[i]: np.asarray(series[i].y) for i in range(len(series))})
-        return _attach_time(frame, keys[0], time, absolute_time)
+        frame = pl.DataFrame({names[i]: np.asarray(series[i].y, dtype=np.float64) for i in range(len(series))})
+        if time == "none":
+            return frame
+        return frame.insert_column(0, _time_series(keys[0], key_name, absolute_time))
     frames = []
     for item, key, name in zip(series, keys, names):
         if len(np.unique(key)) != len(key):
             raise AlignmentError(f"{name} has duplicate timestamps")
-        frames.append(pd.DataFrame({name: np.asarray(item.y), "__t": key}))
+        frames.append(
+            pl.DataFrame(
+                [
+                    _time_series(key, key_name, absolute_time),
+                    pl.Series(name, np.asarray(item.y, dtype=np.float64)),
+                ]
+            )
+        )
     merged = frames[0]
     for frame in frames[1:]:
-        merged = merged.merge(frame, on="__t", how="outer")
-    merged = merged.sort_values("__t", kind="mergesort").reset_index(drop=True)
-    key = merged.pop("__t").to_numpy()
-    return _attach_time(merged, key, time, absolute_time)
-
-
-def _attach_time(frame, key, time: str, absolute: bool):
-    import pandas as pd
-
+        merged = merged.join(frame, on=key_name, how="full", coalesce=True)
+    merged = merged.sort(key_name)
     if time == "none":
-        return frame
+        return merged.drop(key_name)
+    return merged
+
+
+def _time_series(values, name: str, absolute: bool):
+    import polars as pl
+
     if absolute:
-        stamps = pd.to_datetime(np.asarray(key), unit="ns", utc=True)
-        if time == "index":
-            frame.index = pd.DatetimeIndex(stamps, name="time")
-            return frame
-        frame.insert(0, "time", stamps)
-        return frame
-    if time == "index":
-        frame.index = pd.Index(np.asarray(key, dtype=np.float64), name="relative_s")
-        return frame
-    frame.insert(0, "relative_s", np.asarray(key, dtype=np.float64))
-    return frame
+        return pl.Series(name, np.asarray(values)).cast(pl.Datetime("ns", "UTC"))
+    return pl.Series(name, np.asarray(values, dtype=np.float64))

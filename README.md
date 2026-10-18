@@ -279,7 +279,7 @@ for _, s := range series {
 
 ## Python
 
-`python/` is the client that lets a Python and pandas tool stop importing npTDMS. It launches `gotdms-bridge` (`bridge/`), a separate Go module that links Apache Arrow. The core module stays dependency-free. Interactive sessions and `gotdms-bridge convert` both return raw samples unless scaling is requested. The mapping, the LGPL-3.0 and MIT license note, and the remaining gaps are in [docs/nptdms-migration.md](docs/nptdms-migration.md).
+`bridge/` is a self-contained Go module and Python client so a numpy and Polars tool can stop importing npTDMS. The bridge links Apache Arrow. The core module stays dependency-free. Interactive sessions and `gotdms-bridge convert` both return raw samples unless scaling is requested. Polars frames use a `time` column, because Polars has no row index. The mapping, the license note, and the remaining gaps are in [bridge/docs/nptdms-migration.md](bridge/docs/nptdms-migration.md). That directory is structured to be lifted out as its own repository.
 
 ## License
 

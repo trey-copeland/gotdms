@@ -1,19 +1,21 @@
 """Python client for gotdms, the MIT TDMS reader.
 
-This package is the npTDMS-decoupling path. Analysis code stays in Python
-with numpy and pandas. It launches the ``gotdms-bridge`` binary instead of
-importing npTDMS (LGPL-3.0-only). Nothing in this package imports npTDMS.
+This package is the npTDMS-decoupling path. Analysis code stays in Python.
+It launches the ``gotdms-bridge`` binary instead of importing npTDMS
+(LGPL-3.0-only). Nothing in this package imports npTDMS.
 
-The bridge speaks Arrow IPC. Install ``gotdms[arrow]`` to decode reads and
-``gotdms[pandas]`` for :func:`as_dataframe`. numpy is required.
+The bridge speaks Arrow IPC, which Polars reads natively. Install
+``gotdms[arrow]`` (pyarrow) to decode reads and ``gotdms[polars]`` for
+:func:`as_polars`. numpy is required; it is BSD-3-Clause. This package does
+not depend on pandas. A caller who wants one can use Polars' ``to_pandas()``.
 
-See ``docs/nptdms-migration.md`` for the npTDMS mapping, the license note,
-and the batch and interactive modes.
+See the migration guide next to this package for the npTDMS mapping, the
+license note, and the batch and interactive modes.
 """
 
 from .bundle import Bundle, load_bundle
 from .client import Channel, Group, Session, locate_binary, open
-from .codec import Series, as_dataframe
+from .codec import Series, as_polars
 from .errors import (
     AlignmentError,
     AmbiguousChannelError,
@@ -49,7 +51,7 @@ __all__ = [
     "Series",
     "Session",
     "UntimedError",
-    "as_dataframe",
+    "as_polars",
     "load_bundle",
     "locate_binary",
     "open",
