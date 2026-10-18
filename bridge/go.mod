@@ -1,4 +1,4 @@
-module github.com/trey-copeland/gotdms/bridge
+module github.com/trey-copeland/gotdms-python
 
 go 1.22.0
 
@@ -23,8 +23,10 @@ require (
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 )
 
-// In this checkout the parent directory is the gotdms core module.
-// After this tree is extracted as its own repository, that parent is gone.
-// .github/workflows/ci.yml rewrites the replace onto a gotdms checkout.
-// Until then, `../` is what `go test` in this directory uses.
+// Module path is the future gotdms-python repository, not a subdirectory
+// of the core module. In this checkout the parent directory is still the
+// core module, so the replace below is what `go test` uses.
+// After extraction, delete this replace and require a core tag that
+// contains the dataset API. No such tag exists yet. v0.1.0 of the core
+// module is the reader and writer only. See EXTRACTION.md.
 replace github.com/trey-copeland/gotdms => ../

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,40 @@ class BridgeTest(unittest.TestCase):
             timestamp_channels={"raw": ""},
             numeric_epoch=self.epoch,
         )
+
+    def test_binary_resolution(self):
+        import gotdms
+        from gotdms.client import bundled_binary
+
+        explicit = gotdms.locate_binary("/tmp/does-not-need-to-exist")
+        self.assertEqual(explicit, "/tmp/does-not-need-to-exist")
+        self.assertEqual(gotdms.locate_binary(), os.environ["GOTDMS_BRIDGE"])
+
+        dest_dir = Path(gotdms.__file__).resolve().parent / "_bin"
+        dest_dir.mkdir(exist_ok=True)
+        dest = dest_dir / "gotdms-bridge"
+        shutil.copy(self.bin, dest)
+        dest.chmod(0o755)
+        saved = os.environ.pop("GOTDMS_BRIDGE")
+        try:
+            self.assertEqual(Path(bundled_binary()).resolve(), dest.resolve())
+            self.assertEqual(Path(gotdms.locate_binary()).resolve(), dest.resolve())
+            with gotdms.open(
+                self.demo["files"],
+                timestamp_channel="Time",
+                timestamp_channels={"raw": ""},
+                numeric_epoch=self.epoch,
+            ) as session:
+                got = session["acq"]["ai0"].data()
+            np.testing.assert_array_equal(got, [10, 11, 12, 13, 14, 15])
+            dest.unlink()
+            with self.assertRaises(gotdms.GotdmsError) as raised:
+                gotdms.locate_binary()
+            self.assertIn("pip install gotdms", str(raised.exception))
+        finally:
+            os.environ["GOTDMS_BRIDGE"] = saved
+            if dest.exists():
+                dest.unlink()
 
     def test_arrays_times_and_errors(self):
         import gotdms

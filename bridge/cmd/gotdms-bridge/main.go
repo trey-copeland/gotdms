@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/trey-copeland/gotdms/bridge"
+	"github.com/trey-copeland/gotdms-python"
 	"github.com/trey-copeland/gotdms/dataset"
 )
 

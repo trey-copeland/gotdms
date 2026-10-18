@@ -24,7 +24,7 @@ go build -o gotdms-bridge ./cmd/gotdms-bridge
 export GOTDMS_BRIDGE="$PWD/gotdms-bridge"
 ```
 
-The Python package needs numpy. Interactive reads and `load_bundle` need `pyarrow` (`gotdms[arrow]`). `as_polars` needs Polars (`gotdms[polars]`). pyarrow is the interchange; Polars consumes Arrow natively. If a caller still wants a pandas object, Polars provides `frame.to_pandas()`. That conversion is not a dependency of this package.
+A platform wheel bundles `gotdms-bridge`. `locate_binary` uses an explicit path, then `GOTDMS_BRIDGE`, then that file. NumPy, Polars, and pyarrow are dependencies of the Python package (`requires-python` is `>=3.10` because Polars 2.0 requires it). If a caller still wants a pandas object, Polars provides `frame.to_pandas()`. That conversion is not a dependency of this package.
 
 ## Two modes
 

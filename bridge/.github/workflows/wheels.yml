@@ -1,0 +1,77 @@
+# This file lives at bridge/.github/workflows/wheels.yml inside the gotdms
+# repository. GitHub only runs workflows from a repository root, so gotdms
+# CI does not execute it.
+#
+# When bridge/ is extracted as gotdms-python, this directory becomes
+# .github/workflows. Paths below are relative to that root: pyproject.toml,
+# scripts/build_dist.py, and python/tests sit next to go.mod.
+
+name: wheels
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    name: build wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # While this tree is inside gotdms, ../ is the core module.
+      # After extraction, check out gotdms beside the sources and point
+      # the replace at it. Skip the checkout when the parent is already
+      # the core module (local monorepo builds).
+      - name: Core module for an extracted checkout
+        run: |
+          if [ -f ../go.mod ] && head -n 1 ../go.mod | grep -q '^module github.com/trey-copeland/gotdms$'; then
+            echo "parent checkout is the core module"
+            exit 0
+          fi
+          git clone --depth 1 https://github.com/trey-copeland/gotdms.git _gotdms
+          go mod edit -replace github.com/trey-copeland/gotdms=./_gotdms
+
+      - name: Install build tools
+        run: python -m pip install build hatchling twine
+
+      - name: Source distribution
+        run: python scripts/build_dist.py --sdist
+
+      - name: Linux amd64 wheel
+        run: python scripts/build_dist.py --goos linux --goarch amd64 --platform-tag manylinux_2_17_x86_64
+
+      - name: Metadata check
+        run: python -m twine check dist/*
+
+      - name: Install the wheel in a clean venv
+        run: |
+          python -m venv /tmp/gotdms-venv
+          /tmp/gotdms-venv/bin/pip install dist/*manylinux*.whl
+          cd /tmp
+          unset GOTDMS_BRIDGE
+          /tmp/gotdms-venv/bin/python - <<'PY'
+          import gotdms
+          path = gotdms.locate_binary()
+          print(path)
+          assert "_bin" in path
+          assert "GOTDMS_BRIDGE" not in __import__("os").environ
+          PY
+
+      - name: Python tests against a built binary
+        run: /tmp/gotdms-venv/bin/python -m unittest python/tests/test_session.py

@@ -1,35 +1,46 @@
-# gotdms-python
+# gotdms
 
-MIT bridge from the [gotdms](https://github.com/trey-copeland/gotdms) TDMS library to Python. The analysis tool stays in Python. It uses numpy arrays and Polars frames. It does not import npTDMS.
+Python client for the MIT [gotdms](https://github.com/trey-copeland/gotdms) TDMS reader. Analysis stays in Python. Frames are Polars. Samples are NumPy arrays. The package does not import npTDMS.
 
-This directory is self-contained so it can be lifted out as its own repository. While it sits inside the gotdms checkout, `go.mod` replaces the core module with `../`. After extraction, that parent is gone. The workflow under `.github/workflows/` checks out gotdms and rewrites the replace. See the comment at the top of that file: inside gotdms the workflow path is `bridge/.github/workflows`, and GitHub does not run it until this directory is the repository root.
+NumPy is BSD-3-Clause. Polars and `polars-runtime-32` are MIT. pyarrow, used to read the Arrow IPC stream, is Apache-2.0. The license inventory is `THIRD_PARTY.md`.
 
-## Layout
+Wheels bundle the `gotdms-bridge` binary for one platform. `locate_binary` checks an explicit path, then the `GOTDMS_BRIDGE` environment variable, then that bundled file. If none of those exist it raises `GotdmsError` and tells you to `pip install gotdms` or to build the binary with Go. It does not search `PATH`. Installing the source distribution compiles the binary (`CGO_ENABLED=0`, Go on `PATH`) and tags the wheel for the machine it is building on.
 
-- `cmd/gotdms-bridge` is the binary: `serve` for a long-lived session, `convert` for a batch bundle.
-- `python/` is the client (`pyproject.toml`, package `gotdms`).
-- `docs/nptdms-migration.md` maps npTDMS post-analysis calls onto this client.
-- `LICENSE` is MIT.
+```python
+import gotdms
 
-The core gotdms module stays dependency-free. Apache Arrow Go is linked only here.
-
-## Build
-
-```bash
-go build -o gotdms-bridge ./cmd/gotdms-bridge
-export GOTDMS_BRIDGE="$PWD/gotdms-bridge"
+with gotdms.open(
+    ["a.tdms", "b.tdms"],
+    timestamp_channel="Time",
+    numeric_epoch="2024-03-01T00:00:00Z",
+) as session:
+    values = session["acq"]["ai0"].data()  # raw float64
+    times = session["acq"]["ai0"].time_track(absolute_time=True)
+    frame = session.as_polars(time="column", align="strict")
 ```
 
-numpy is required and is BSD-3-Clause. Decode needs pyarrow (`gotdms[arrow]`). Frames need Polars (`gotdms[polars]`). pyarrow is the interchange; Polars speaks Arrow natively. This project does not depend on pandas. `frame.to_pandas()` is Polars' own conversion when a caller wants it.
+Polars has no row index. npTDMS `as_dataframe(time_index=True)` is the `time` column (`Datetime(ns, UTC)`). `align="strict"` requires equal time vectors and inserts no nulls. `align="nptdms"` is a full outer join on that column and inserts nulls where npTDMS inserted NaNs. `scaled` defaults to false. npTDMS scales unless you opt out. Pass `scaled=True` only when an NI linear scale should be applied. A missing scale is an error. Non-linear scales and DAQmx are not applied.
 
-## Two modes
+`time_track(absolute_time=False)` is seconds since the basis you set, not npTDMS's zero-at-first-sample track.
 
-Interactive: `gotdms.open(...)` keeps one process open and reads channels or time windows on demand. One `read_many` is one response, so a shared timestamp channel is decoded once.
+A pandas object, if you still want one, is `frame.to_pandas()` on the Polars result. This package does not depend on pandas.
 
-Batch: `gotdms-bridge convert` writes `manifest.json` plus one Arrow IPC stream per channel. `gotdms.load_bundle` opens that directory, and `as_polars` builds a Polars frame.
+Batch conversion, from the bundled binary or from `GOTDMS_BRIDGE`:
 
-Samples are raw unless `scaled=True` or `--scaled`. A missing linear scale is an error. Non-linear scales and DAQmx scaling are not applied.
+```bash
+gotdms-bridge convert \
+  --dir run --timestamp-channel Time \
+  --numeric-epoch 2024-03-01T00:00:00Z \
+  --out bundle
+```
 
-Polars has no row index. npTDMS `as_dataframe(time_index=True)` becomes a `time` column (`Datetime(ns, UTC)`), not an index. `align="strict"` requires equal time vectors. `align="nptdms"` is a full outer join on that column and inserts nulls where npTDMS inserted NaNs. Relative time is seconds since the basis, not npTDMS's zero-at-first-sample track.
+```python
+bundle = gotdms.load_bundle("bundle")
+frame = bundle.as_polars()
+```
 
-The call-site map, both modes, and the remaining gaps are in [docs/nptdms-migration.md](docs/nptdms-migration.md).
+The long npTDMS mapping, including the LGPL-3.0 and MIT license note, is `docs/nptdms-migration.md` in the source distribution. This project's own license is MIT (`LICENSE`).
+
+Python 3.10 or newer. The client and the bridge speak protocol version 1. That protocol number, not a core git tag, is the compatibility check between them. The core module is versioned on its own. Its proposed `v0.1.0` is the reader and writer only. This binary needs the dataset API, which is not in that tag yet. See `EXTRACTION.md`.
+
+The repository URLs in the package metadata point at `github.com/trey-copeland/gotdms-python`, which is the intended name and does not exist until that repository is created.

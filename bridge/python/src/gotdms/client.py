@@ -8,10 +8,10 @@ dataset layer and returned once. This module does not import npTDMS.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .codec import as_polars, series_from_parts, split_payload, write_frame, read_frame
 from .errors import (
@@ -46,16 +46,38 @@ _CODE_TYPES = {
 }
 
 
-def locate_binary(explicit=None) -> str:
-    """Return the gotdms-bridge path.
+def bundled_binary() -> str | None:
+    """Path of the binary shipped in this wheel, if this install has one."""
+    name = "gotdms-bridge.exe" if os.name == "nt" else "gotdms-bridge"
+    path = Path(__file__).resolve().parent / "_bin" / name
+    if path.is_file():
+        return str(path)
+    return None
 
-    ``GOTDMS_BRIDGE`` overrides ``explicit`` when explicit is omitted, then
-    ``PATH``. There is no bundled copy inside this package.
+
+def locate_binary(explicit=None) -> str:
+    """Find gotdms-bridge.
+
+    An explicit ``binary=`` argument wins, then the ``GOTDMS_BRIDGE``
+    environment variable, then the binary bundled in the wheel. A wheel
+    install therefore uses the bundled binary unless the caller overrides
+    it. There is no PATH search. If none of the three exist, this raises
+    with install instructions.
     """
-    path = explicit or os.environ.get("GOTDMS_BRIDGE") or shutil.which("gotdms-bridge")
-    if not path:
-        raise GotdmsError("gotdms-bridge not found; set GOTDMS_BRIDGE or install the binary on PATH")
-    return path
+    if explicit:
+        return explicit
+    env = os.environ.get("GOTDMS_BRIDGE")
+    if env:
+        return env
+    bundled = bundled_binary()
+    if bundled:
+        return bundled
+    raise GotdmsError(
+        "gotdms-bridge was not found. Install a platform wheel so the binary "
+        "is bundled (`pip install gotdms`), or set GOTDMS_BRIDGE to a binary "
+        "from `go build -o gotdms-bridge ./cmd/gotdms-bridge` in the "
+        "gotdms-python source tree (Go required). Protocol version 1."
+    )
 
 
 class Session:
