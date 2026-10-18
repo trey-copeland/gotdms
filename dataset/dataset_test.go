@@ -364,7 +364,9 @@ func TestNonMonotonic(t *testing.T) {
 		t.Fatal("catalog should keep the channel")
 	}
 	occ := ds.Find("ai0")[0]
-	if !occ.Start.Equal(epoch) || !occ.Last.Equal(epoch.Add(2*time.Second)) || occ.Dt != 0 {
+	// First step is +2s, so the catalog span is provisional: Last is
+	// first+(n-1)*dt = 4s, not the true max at 2s. Read still rejects it.
+	if !occ.Start.Equal(epoch) || !occ.Last.Equal(epoch.Add(4*time.Second)) || occ.Dt != 2 {
 		t.Fatalf("span start=%s last=%s dt=%v", occ.Start, occ.Last, occ.Dt)
 	}
 	_, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(500*time.Millisecond))
@@ -374,6 +376,10 @@ func TestNonMonotonic(t *testing.T) {
 	_, err = ds.Read(Selector{Name: "ai0"})
 	if !errors.Is(err, ErrMonotonic) {
 		t.Fatalf("read err = %v", err)
+	}
+	_, err = ds.ReadMany([]Selector{{Name: "ai0"}}, epoch, epoch.Add(time.Hour))
+	if !errors.Is(err, ErrMonotonic) {
+		t.Fatalf("readmany err = %v", err)
 	}
 }
 
@@ -646,6 +652,10 @@ func TestWindowCropAndPrune(t *testing.T) {
 	}
 	if len(empty.Y) != 0 || !empty.Timed {
 		t.Fatalf("empty timed=%v Y=%v", empty.Timed, empty.Y)
+	}
+	before, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch.Add(-2*time.Second), epoch.Add(-time.Second))
+	if err != nil || len(before.Y) != 0 || !before.Timed {
+		t.Fatalf("before window Y=%v err=%v", before.Y, err)
 	}
 	_, err = ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch)
 	if !errors.Is(err, ErrArgument) {

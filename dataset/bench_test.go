@@ -191,7 +191,9 @@ func BenchmarkReadManySharedClock(b *testing.B) {
 	}
 }
 
-// BenchmarkReadWindowTail reads 64 samples at the end of a 1<<20 timestamp axis.
+// BenchmarkReadWindowTail reads 64 samples at the end of a 1<<20 timestamp
+// axis. main has no range read, so this decodes the prefix and then clips.
+// The result is that cost. It is not a claim that the tail is cheap.
 func BenchmarkReadWindowTail(b *testing.B) {
 	const n = 1 << 20
 	path := sharedClockFile(b, n, 1)
@@ -214,8 +216,10 @@ func BenchmarkReadWindowTail(b *testing.B) {
 	}
 }
 
-// BenchmarkReadWindowTailWaveform is the same tail window on a wf_* axis,
-// which has to walk a cursor from sample 0.
+// BenchmarkReadWindowTailWaveform is the same tail window on a wf_* axis.
+// The index of the window is known from t0 and dt, but main exports no
+// per-segment sample counts and no range read, so the cursor still starts
+// at sample 0. The benchmark measures that prefix decode.
 func BenchmarkReadWindowTailWaveform(b *testing.B) {
 	const n = 1 << 20
 	dir := b.TempDir()

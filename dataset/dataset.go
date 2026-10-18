@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/trey-copeland/gotdms"
@@ -99,18 +100,31 @@ type Occurrence struct {
 	// for its group. Its values are the time axis. It does not reference
 	// another channel.
 	IsTimestamp bool
-	Samples     int
-	Timed       bool
-	Source      TimeSource
-	// Start is the earliest sample time. Last is the latest. Both are zero
-	// when Timed is false or Samples is 0. For a positive increment, Start is
-	// the first sample and Last is the last.
+	// Samples is Channel.Len. The core total is an int64 narrowed to int by
+	// that method; index math inside this package stays int64.
+	Samples int
+	Timed   bool
+	Source  TimeSource
+	// Start and Last bound the samples catalog will open for a window.
+	// Both are zero when Timed is false or Samples is 0. Waveform fallback
+	// sets them from wf_start_time and wf_increment with no sample reads.
+	//
+	// A declared clock whose first step is positive is not scanned. Start is
+	// the first sample, Dt is that step in seconds, and Last is the instant
+	// of sample Samples-1 on a uniform arithmetic axis (first + (n-1) steps).
+	// That matches a well-formed clock. It is provisional: later steps are
+	// checked at read, not here, and a window that misses this span does not
+	// open the file. An irregular axis can be skipped. A first step that is
+	// not positive is scanned in full, so Start/Last are the true min/max.
 	Start time.Time
 	Last  time.Time
-	// Dt is the uniform step in seconds when one can be determined. It is 0
-	// for untimed channels, for a single timestamp sample, and for an
-	// irregular or non-positive timestamp axis. Waveform fallback stores
-	// wf_increment, which may be negative or zero.
+	// Dt is the step in seconds. It is 0 for untimed channels, a single
+	// sample, and a declared clock whose first step is not positive and whose
+	// full scan is not uniform. For a declared clock with a positive first
+	// step, Dt is that step and is provisional until read; Series.Dt is the
+	// value uniformDt computes from the decoded axis, or 0 when a later step
+	// disagrees. Waveform fallback stores wf_increment, which may be negative
+	// or zero.
 	Dt float64
 	// Timestamp is the declared timestamp channel name when this data channel
 	// took its axis from that channel. It is empty on the timestamp channel
@@ -144,9 +158,14 @@ type Series struct {
 	IsTimestamp bool
 	Source      TimeSource
 	Dt          float64
-	Y           []float64
-	Times       []time.Time
-	Gaps        []Gap
+	// Y and Times are owned by this Series. They do not alias another Series,
+	// a shared clock retained for a second channel, or a tdms.Cursor batch.
+	// Cursor batches are valid only until the next Next, so any Series built
+	// from a cursor copies the values out. RelativeTimes and RelativeTimesFrom
+	// allocate a new vector on every call.
+	Y     []float64
+	Times []time.Time
+	Gaps  []Gap
 	// Basis is the anchor for RelativeTimes: sample time minus Basis, in
 	// seconds. It is the dataset basis, or the WithReadBasis value for the
 	// call that returned this series. It is not the first sample of the
@@ -240,7 +259,10 @@ func WithWorkers(n int) Option {
 }
 
 // WithReadWorkers sets how many files Read and ReadMany open at once.
-// Non-positive selects the default of 4.
+// Non-positive selects the default of 4. The value is a cap, not a target.
+// WithReadWorkers(100) holds up to 100 files open for the duration of the
+// call and fails when the process is out of file descriptors. An error
+// closes every file that call opened.
 func WithReadWorkers(n int) Option {
 	return func(o *options) {
 		if n > 0 {
@@ -798,28 +820,27 @@ func indexFile(path string, opt options) ([]Occurrence, error) {
 	return out, nil
 }
 
-// spanDeclared reports the catalog span of a declared clock without retaining
-// a sample vector. The channel is still decoded in full: uniform dt and a
-// non-monotonic min/max both require every sample, and the core reader has no
-// range read. The decoded buffer is released when this returns.
+// spanDeclaredCalls counts catalog clock inspections. A shared clock is one
+// call per file, not one call per data channel. Tests read the counter.
+var spanDeclaredCalls atomic.Uint64
+
+// spanDeclared reports the catalog span of a declared clock.
+//
+// A positive first step does not decode the channel. The core reader has no
+// range read, so the last sample cannot be fetched without the prefix. Last
+// is derived from the first two samples and the length: it equals the last
+// sample when the stored axis is a uniform arithmetic sequence. Monotonicity
+// is not proved here. Read, ReadWindow, and ReadMany decode the axis and
+// return ErrMonotonic on a backwards step. Dt is that first step, which is
+// what uniformDt returns for a uniform axis; a later irregular step is caught
+// when the axis is decoded, and Series.Dt is then 0.
+//
+// A first step that is not positive cannot be extrapolated. Those clocks are
+// scanned in full so Start/Last stay the true min/max.
 func spanDeclared(ch *tdms.Channel, opt options) (start, last time.Time, dt float64, hasDt, usable bool, err error) {
+	spanDeclaredCalls.Add(1)
 	if ch.DataType() == tdms.TypeTimestamp {
-		if ch.Len() == 0 {
-			return time.Time{}, time.Time{}, 0, false, true, nil
-		}
-		raw, err := ch.Timestamps()
-		if err != nil {
-			return time.Time{}, time.Time{}, 0, false, true, err
-		}
-		var acc timeAcc
-		for i, t := range raw {
-			tm, ok := t.Time()
-			if !ok {
-				return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: channel %q timestamp %d (%d s) does not fit in time.Time", ErrArgument, ch.Name(), i, t.Seconds)
-			}
-			acc.add(tm)
-		}
-		return acc.start, acc.last, acc.dt, acc.hasDt, true, nil
+		return spanTimestamp(ch)
 	}
 	if !numericTimeType(ch.DataType()) {
 		return time.Time{}, time.Time{}, 0, false, false, nil
@@ -830,6 +851,43 @@ func spanDeclared(ch *tdms.Channel, opt options) (start, last time.Time, dt floa
 	if !opt.epochSet {
 		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: numeric timestamp channel %q in group %q requires WithNumericEpoch", ErrArgument, ch.Name(), ch.GroupName())
 	}
+	return spanNumeric(ch, opt)
+}
+
+func spanNumeric(ch *tdms.Channel, opt options) (start, last time.Time, dt float64, hasDt, usable bool, err error) {
+	n := int64(ch.Len())
+	want := 2
+	if n < 2 {
+		want = int(n)
+	}
+	head, err := headFloats(ch, want)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, err
+	}
+	t0, err := secondsToTime(opt.epoch, head[0])
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+	}
+	if n == 1 {
+		return t0, t0, 0, false, true, nil
+	}
+	t1, err := secondsToTime(opt.epoch, head[1])
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+	}
+	if !t1.After(t0) {
+		return spanNumericScan(ch, opt)
+	}
+	delta := head[1] - head[0]
+	lastSec := head[0] + float64(n-1)*delta
+	tLast, err := secondsToTime(opt.epoch, lastSec)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+	}
+	return t0, tLast, t1.Sub(t0).Seconds(), true, true, nil
+}
+
+func spanNumericScan(ch *tdms.Channel, opt options) (start, last time.Time, dt float64, hasDt, usable bool, err error) {
 	ys, err := ch.Float64s()
 	if err != nil {
 		return time.Time{}, time.Time{}, 0, false, true, err
@@ -843,6 +901,138 @@ func spanDeclared(ch *tdms.Channel, opt options) (start, last time.Time, dt floa
 		acc.add(tm)
 	}
 	return acc.start, acc.last, acc.dt, acc.hasDt, true, nil
+}
+
+func spanTimestamp(ch *tdms.Channel) (start, last time.Time, dt float64, hasDt, usable bool, err error) {
+	n := int64(ch.Len())
+	if n == 0 {
+		return time.Time{}, time.Time{}, 0, false, true, nil
+	}
+	want := 2
+	if n < 2 {
+		want = 1
+	}
+	head, err := headTimestamps(ch, want)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, err
+	}
+	t0, ok := head[0].Time()
+	if !ok {
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: channel %q timestamp 0 (%d s) does not fit in time.Time", ErrArgument, ch.Name(), head[0].Seconds)
+	}
+	if n == 1 {
+		return t0, t0, 0, false, true, nil
+	}
+	t1, ok := head[1].Time()
+	if !ok {
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: channel %q timestamp 1 (%d s) does not fit in time.Time", ErrArgument, ch.Name(), head[1].Seconds)
+	}
+	if !t1.After(t0) {
+		return spanTimestampScan(ch)
+	}
+	step := t1.Sub(t0)
+	tLast, err := addSteps(t0, step, n-1)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+	}
+	return t0, tLast, step.Seconds(), true, true, nil
+}
+
+func spanTimestampScan(ch *tdms.Channel) (start, last time.Time, dt float64, hasDt, usable bool, err error) {
+	raw, err := ch.Timestamps()
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, true, err
+	}
+	var acc timeAcc
+	for i, t := range raw {
+		tm, ok := t.Time()
+		if !ok {
+			return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: channel %q timestamp %d (%d s) does not fit in time.Time", ErrArgument, ch.Name(), i, t.Seconds)
+		}
+		acc.add(tm)
+	}
+	return acc.start, acc.last, acc.dt, acc.hasDt, true, nil
+}
+
+// headFloats copies the first n numeric samples out of a cursor batch.
+// The batch is not kept: Cursor may reuse it on the next Next.
+func headFloats(ch *tdms.Channel, n int) ([]float64, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	if n > ch.Len() {
+		n = ch.Len()
+	}
+	cur := ch.Cursor(n)
+	out := make([]float64, 0, n)
+	for cur.Next() && len(out) < n {
+		batch, err := cur.Float64s()
+		if err != nil {
+			return nil, err
+		}
+		need := n - len(out)
+		if len(batch) > need {
+			batch = batch[:need]
+		}
+		out = append(out, batch...)
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) != n {
+		return nil, fmt.Errorf("%w: channel %q: read %d of %d timestamp samples", ErrArgument, ch.Name(), len(out), n)
+	}
+	return out, nil
+}
+
+func headTimestamps(ch *tdms.Channel, n int) ([]tdms.Timestamp, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	if n > ch.Len() {
+		n = ch.Len()
+	}
+	cur := ch.Cursor(n)
+	out := make([]tdms.Timestamp, 0, n)
+	for cur.Next() && len(out) < n {
+		batch, ok := cur.Values().([]tdms.Timestamp)
+		if !ok || batch == nil {
+			return nil, fmt.Errorf("%w: channel %q is not a timestamp axis", ErrUntimed, ch.Name())
+		}
+		need := n - len(out)
+		if len(batch) > need {
+			batch = batch[:need]
+		}
+		out = append(out, batch...)
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) != n {
+		return nil, fmt.Errorf("%w: channel %q: read %d of %d timestamp samples", ErrArgument, ch.Name(), len(out), n)
+	}
+	return out, nil
+}
+
+// addSteps returns t + n*step, or ErrArgument when the product overflows.
+func addSteps(t time.Time, step time.Duration, n int64) (time.Time, error) {
+	if n <= 0 || step == 0 {
+		return t, nil
+	}
+	if step == time.Duration(math.MinInt64) {
+		if n != 1 {
+			return time.Time{}, fmt.Errorf("%w: timestamp span does not fit in time.Time", ErrArgument)
+		}
+		return t.Add(step), nil
+	}
+	mag := int64(step)
+	if mag < 0 {
+		mag = -mag
+	}
+	if n > int64(math.MaxInt64)/mag {
+		return time.Time{}, fmt.Errorf("%w: timestamp span does not fit in time.Time", ErrArgument)
+	}
+	return t.Add(step * time.Duration(n)), nil
 }
 
 // loadAxis decodes a declared clock once. y is the channel's float64 values
@@ -900,8 +1090,10 @@ func loadAxis(ch *tdms.Channel, opt options, wantY bool) (times []time.Time, y [
 	return times, y, nil
 }
 
-// timeAcc matches applySpan plus uniformDt: min/max even when the axis steps
-// backwards, and Dt only when every positive step matches the first within 1ns.
+// timeAcc records the earliest and latest sample in add, including when the
+// axis steps backwards, and sets Dt only when every positive step matches the
+// first within 1ns. That is the same Dt rule as uniformDt. spanDeclared uses
+// it only for a clock whose first step is not positive.
 type timeAcc struct {
 	start, last, prev time.Time
 	dt                float64
@@ -977,7 +1169,7 @@ func applyWaveform(o *Occurrence, ch *tdms.Channel) error {
 	if ch.Len() == 0 {
 		return nil
 	}
-	lo, hi, err := waveformSpan(start, inc, ch.Len())
+	lo, hi, err := waveformSpan(start, inc, int64(ch.Len()))
 	if err != nil {
 		return fmt.Errorf("%w: waveform time of %s", ErrArgument, ch.Path())
 	}
@@ -1002,7 +1194,7 @@ func uniformDt(times []time.Time) (float64, bool) {
 	return dt, true
 }
 
-func waveformSpan(start time.Time, inc float64, n int) (time.Time, time.Time, error) {
+func waveformSpan(start time.Time, inc float64, n int64) (time.Time, time.Time, error) {
 	t0, err := waveformAt(start, inc, 0)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
@@ -1020,7 +1212,7 @@ func waveformSpan(start time.Time, inc float64, n int) (time.Time, time.Time, er
 	return t0, tN, nil
 }
 
-func waveformAt(start time.Time, inc float64, i int) (time.Time, error) {
+func waveformAt(start time.Time, inc float64, i int64) (time.Time, error) {
 	if i == 0 || inc == 0 {
 		return start, nil
 	}

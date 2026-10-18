@@ -68,20 +68,27 @@
 // # Reads and memory
 //
 // Files whose span misses the window are not opened. A declared timestamp
-// axis is the sample values, so catalog and read both decode that channel.
-// Catalog keeps only the span (earliest, latest, uniform dt) and does not
-// retain the samples. It still decodes every sample: the core reader has no
-// range read, and a non-uniform or non-monotonic axis cannot be summarized
-// from the endpoints alone. The decoded buffer is discarded before the next
-// file. Read decodes the axis again. ReadMany of several channels in one file
-// opens that file once and decodes a shared clock once; each series then gets
-// its own copy of the time vector so later mutation does not alias. The paired
-// data channel is decoded in full. Waveform fallback does not load samples to
-// build the span. Inside a waveform file the core reader has no sample seek:
-// Cursor starts at the first sample, batches before the window are discarded,
-// and the walk stops at the window. A window at the end of a long channel
-// still decodes the prefix. Sample i is StartTime plus i times Increment,
-// rounded to the nearest nanosecond in one multiply.
+// axis is the sample values. Catalog does not prove that the axis is
+// monotonic. When the first step is positive it reads only the first two
+// samples: Dt is that step, and Last is the time of sample n-1 on a uniform
+// arithmetic axis. The core reader has no range read, so the last sample
+// itself is not fetched. That span matches a well-formed clock and is
+// provisional otherwise. A window that misses it does not open the file, so
+// an irregular axis can be skipped. A first step that is not positive is
+// scanned in full (true min/max, Dt only when every step matches). Read
+// decodes the axis again and returns ErrMonotonic if a sample steps
+// backwards. Series.Dt comes from that decode and is 0 when a later step
+// disagrees with the first. ReadMany of several channels in one file opens
+// that file once and decodes a shared clock once; each series then gets its
+// own copy of the time vector so later mutation does not alias. Returned
+// slices are owned by the Series. The paired data channel is decoded in full
+// on read. Waveform fallback does not load samples to build the span. main
+// exports SegmentCount and Len, not per-segment sample bounds, so a waveform
+// window cannot skip a leading segment. Cursor starts at the first sample,
+// batches before the window are copied out and the rest discarded, and the
+// walk stops at the window. A window at the end of a long channel still
+// decodes the prefix. Sample i is StartTime plus i times Increment, rounded
+// to the nearest nanosecond in one multiply.
 //
 // Waveform properties are the latest wf_start_time and wf_increment on the
 // channel. Segments that append under that same t0 and dt are correct. A later
@@ -93,6 +100,8 @@
 // Catalog and reads use a bounded worker pool (WithWorkers, WithReadWorkers).
 // ReadMany's pool is the whole call: it does not start another pool per
 // selector, so the worker count is also the cap on files open at once.
-// Open does not keep file handles after it returns. Reads do not keep them
-// either.
+// The default cap is 4. A larger cap, including WithReadWorkers(100), opens
+// that many files together and can exhaust the process file-descriptor limit.
+// An error closes every file that call opened. Open does not keep file
+// handles after it returns. Reads do not keep them either.
 package dataset

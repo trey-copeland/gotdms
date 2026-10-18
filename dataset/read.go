@@ -66,12 +66,12 @@ func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window b
 	if v, has := ch.Increment(); has {
 		inc = v
 	}
-	n := ch.Len()
+	n := int64(ch.Len())
 	p := piece{file: o.File, dt: inc, timed: true}
 	if n == 0 {
 		return p, nil
 	}
-	i0, i1 := 0, n
+	i0, i1 := int64(0), n
 	if window {
 		var err error
 		i0, i1, err = waveformBounds(t0, inc, n, start, end)
@@ -88,7 +88,7 @@ func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window b
 	}
 	times := make([]time.Time, len(y))
 	for i := range times {
-		tm, err := waveformAt(t0, inc, i0+i)
+		tm, err := waveformAt(t0, inc, i0+int64(i))
 		if err != nil {
 			return piece{}, err
 		}
@@ -102,7 +102,7 @@ func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window b
 	return p, nil
 }
 
-func waveformBounds(t0 time.Time, inc float64, n int, winStart, winEnd time.Time) (int, int, error) {
+func waveformBounds(t0 time.Time, inc float64, n int64, winStart, winEnd time.Time) (int64, int64, error) {
 	if _, err := waveformAt(t0, inc, 0); err != nil {
 		return 0, 0, err
 	}
@@ -127,10 +127,10 @@ func waveformBounds(t0 time.Time, inc float64, n int, winStart, winEnd time.Time
 	return i0, i1, nil
 }
 
-func firstAtOrAfter(t0 time.Time, inc float64, n int, target time.Time) int {
-	lo, hi := 0, n
+func firstAtOrAfter(t0 time.Time, inc float64, n int64, target time.Time) int64 {
+	lo, hi := int64(0), n
 	for lo < hi {
-		mid := (lo + hi) / 2
+		mid := lo + (hi-lo)/2
 		tm, _ := waveformAt(t0, inc, mid)
 		if tm.Before(target) {
 			lo = mid + 1
@@ -141,10 +141,10 @@ func firstAtOrAfter(t0 time.Time, inc float64, n int, target time.Time) int {
 	return lo
 }
 
-func firstBefore(t0 time.Time, inc float64, n int, target time.Time) int {
-	lo, hi := 0, n
+func firstBefore(t0 time.Time, inc float64, n int64, target time.Time) int64 {
+	lo, hi := int64(0), n
 	for lo < hi {
-		mid := (lo + hi) / 2
+		mid := lo + (hi-lo)/2
 		tm, _ := waveformAt(t0, inc, mid)
 		if !tm.Before(target) {
 			lo = mid + 1
@@ -498,39 +498,52 @@ func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurr
 	return p, nil
 }
 
-func readFloatSpan(ch *tdms.Channel, i0, i1 int) ([]float64, error) {
+func readFloatSpan(ch *tdms.Channel, i0, i1 int64) ([]float64, error) {
 	if i1 <= i0 {
 		return []float64{}, nil
 	}
-	// Cursor has no seek. Batches before i0 are decoded and discarded.
-	// The walk stops once i1 is reached, so the tail of the channel is not read.
-	out := make([]float64, 0, i1-i0)
+	// Cursor's index is an int, matching Channel.Len. A span that does not
+	// fit is rejected instead of narrowing.
+	s0, err := indexToInt(i0)
+	if err != nil {
+		return nil, err
+	}
+	s1, err := indexToInt(i1)
+	if err != nil {
+		return nil, err
+	}
+	// Cursor has no seek and reuses the batch slice on the next Next.
+	// Values are copied into out before the next batch. Leading batches are
+	// decoded and discarded. The walk stops at i1, so the tail is not read.
+	// main does not export per-segment sample bounds, so whole leading
+	// segments cannot be skipped from this package.
+	out := make([]float64, 0, s1-s0)
 	cur := ch.Cursor(8192)
 	idx := 0
 	for cur.Next() {
-		if idx >= i1 {
+		if idx >= s1 {
 			break
 		}
 		batch, err := cur.Float64s()
 		if err != nil {
 			return nil, err
 		}
-		if idx+len(batch) <= i0 {
+		if idx+len(batch) <= s0 {
 			idx += len(batch)
 			continue
 		}
 		for i, v := range batch {
 			abs := idx + i
-			if abs < i0 {
+			if abs < s0 {
 				continue
 			}
-			if abs >= i1 {
+			if abs >= s1 {
 				return out, nil
 			}
 			out = append(out, v)
 		}
 		idx += len(batch)
-		if idx >= i1 {
+		if idx >= s1 {
 			break
 		}
 	}
@@ -538,6 +551,13 @@ func readFloatSpan(ch *tdms.Channel, i0, i1 int) ([]float64, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func indexToInt(v int64) (int, error) {
+	if v < 0 || int64(int(v)) != v {
+		return 0, fmt.Errorf("%w: sample index %d", ErrArgument, v)
+	}
+	return int(v), nil
 }
 
 func mergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
@@ -683,18 +703,35 @@ func gapBetween(t, last time.Time, dt float64) bool {
 	return t.After(addDt(last, dt).Add(timeSlack))
 }
 
-func addDt(t time.Time, dt float64) time.Time {
-	if dt == 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
-		return t
+// roundedStep is dt rounded to nanoseconds, the same rounding addDt applies.
+// ok is false when the rounded step is 0 (a positive dt below 0.5ns, or a
+// non-finite dt). A loop that advances with this step would otherwise spin:
+// Resample is the only such loop. waveformAt and secondsToTime round one
+// absolute instant, and the overlap helpers call addDt once per sample.
+// This branch does not call a core TimeAt.
+func roundedStep(dt float64) (time.Duration, bool) {
+	if math.IsNaN(dt) || math.IsInf(dt, 0) {
+		return 0, false
 	}
 	ns := math.Round(dt * 1e9)
+	if math.IsNaN(ns) || math.IsInf(ns, 0) || ns == 0 {
+		return 0, false
+	}
 	if ns >= float64(math.MaxInt64) {
-		return t.Add(time.Duration(math.MaxInt64))
+		return time.Duration(math.MaxInt64), true
 	}
 	if ns <= float64(math.MinInt64) {
-		return t.Add(time.Duration(math.MinInt64))
+		return time.Duration(math.MinInt64), true
 	}
-	return t.Add(time.Duration(ns))
+	return time.Duration(int64(ns)), true
+}
+
+func addDt(t time.Time, dt float64) time.Time {
+	step, ok := roundedStep(dt)
+	if !ok {
+		return t
+	}
+	return t.Add(step)
 }
 
 func fmtOverlap(kept []string, file string, t time.Time) error {
@@ -722,11 +759,19 @@ func (w *wrapped) Unwrap() error { return w.err }
 //
 // Grid points before the first sample, after the last sample, or inside a
 // Gap are omitted. The result can be shorter than the grid. Values are not
-// extrapolated. An untimed series returns ErrUntimed. dt must be positive.
-// A grid of more than 10 million points returns ErrArgument.
+// extrapolated. An untimed series returns ErrUntimed. dt must be positive
+// and round to at least 1ns. A grid of more than 10 million points returns
+// ErrArgument.
 //
 // The result keeps absolute Times and copies Basis. RelativeTimes is still
 // sample time minus that basis, not seconds since the first grid point.
+// Y and Times are allocated once each, at the grid length. Points that fall
+// outside the series or inside a gap are omitted, so the length can be shorter
+// than the capacity. There is no second buffer and no trim copy.
+//
+// dt is rounded to nanoseconds the same way addDt rounds. A step that rounds
+// below 1ns returns ErrArgument. Otherwise the grid loop would not advance,
+// and the 10_000_000-point cap would not fire for a short window.
 func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Series, error) {
 	if !s.Timed {
 		return Series{}, errWrap(ErrUntimed, "resample")
@@ -734,11 +779,15 @@ func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Serie
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return Series{}, errWrap(ErrArgument, "resample dt")
 	}
+	step, ok := roundedStep(dt)
+	if !ok || step < time.Nanosecond {
+		return Series{}, errWrap(ErrArgument, "resample dt")
+	}
 	if !end.After(start) {
 		return Series{}, errWrap(ErrArgument, "resample window")
 	}
-	steps := end.Sub(start).Seconds() / dt
-	if math.IsNaN(steps) || math.IsInf(steps, 0) || steps > 10_000_000 {
+	n := gridCount(start, end, step)
+	if n > 10_000_000 {
 		return Series{}, errWrap(ErrArgument, "resample grid too long")
 	}
 	out := Series{
@@ -750,13 +799,13 @@ func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Serie
 		Source:      s.Source,
 		Dt:          dt,
 		Basis:       s.Basis,
-		Y:           []float64{},
-		Times:       []time.Time{},
 	}
-	if len(s.Times) == 0 {
+	if len(s.Times) == 0 || n == 0 {
 		return out, nil
 	}
-	for t := start; t.Before(end); t = addDt(t, dt) {
+	out.Y = make([]float64, 0, n)
+	out.Times = make([]time.Time, 0, n)
+	for t := start; t.Before(end); t = t.Add(step) {
 		if t.Before(s.Times[0]) || t.After(s.Times[len(s.Times)-1]) {
 			continue
 		}
@@ -771,6 +820,22 @@ func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Serie
 		out.Y = append(out.Y, v)
 	}
 	return out, nil
+}
+
+// gridCount is the number of instants in [start, end) spaced by step.
+func gridCount(start, end time.Time, step time.Duration) int64 {
+	if step <= 0 {
+		return 0
+	}
+	span := end.Sub(start)
+	if span <= 0 {
+		return 0
+	}
+	n := int64(span / step)
+	if span%step != 0 {
+		n++
+	}
+	return n
 }
 
 func insideGap(gaps []Gap, t time.Time) bool {
