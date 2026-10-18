@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"time"
+	"unsafe"
 )
 
 // Property is one named value attached to the file, a group, or a channel.
@@ -399,7 +400,69 @@ func decodeExtended(b []byte) Extended {
 }
 
 // decodePacked decodes a little-endian canonical buffer of n values.
+// On a little-endian machine, plain numeric and complex values are copied
+// in one move. Bool, timestamp, and extended values stay on the scalar path,
+// as do all types on a big-endian machine (the bytes are little-endian
+// canonical, which is not the native layout there).
 func decodePacked(dt DataType, b []byte) (any, error) {
+	sz, ok := dt.Size()
+	if !ok || sz == 0 || len(b)%sz != 0 {
+		return nil, ErrCorrupt
+	}
+	if nativeLittleEndian {
+		if v, ok := decodePackedMemcpy(dt, b); ok {
+			return v, nil
+		}
+	}
+	return decodePackedScalar(dt, b)
+}
+
+func decodePackedMemcpy(dt DataType, b []byte) (any, bool) {
+	sz, ok := dt.Size()
+	if !ok || sz == 0 || len(b)%sz != 0 {
+		return nil, false
+	}
+	n := len(b) / sz
+	switch dt.storage() {
+	case TypeInt8:
+		return memcpySlice[int8](b, n, sz), true
+	case TypeInt16:
+		return memcpySlice[int16](b, n, sz), true
+	case TypeInt32:
+		return memcpySlice[int32](b, n, sz), true
+	case TypeInt64:
+		return memcpySlice[int64](b, n, sz), true
+	case TypeUint8:
+		return memcpySlice[uint8](b, n, sz), true
+	case TypeUint16:
+		return memcpySlice[uint16](b, n, sz), true
+	case TypeUint32:
+		return memcpySlice[uint32](b, n, sz), true
+	case TypeUint64:
+		return memcpySlice[uint64](b, n, sz), true
+	case TypeFloat32:
+		return memcpySlice[float32](b, n, sz), true
+	case TypeFloat64:
+		return memcpySlice[float64](b, n, sz), true
+	case TypeComplex64:
+		return memcpySlice[complex64](b, n, sz), true
+	case TypeComplex128:
+		return memcpySlice[complex128](b, n, sz), true
+	default:
+		return nil, false
+	}
+}
+
+func memcpySlice[T fixedNative](b []byte, n, sz int) []T {
+	out := make([]T, n)
+	if n == 0 {
+		return out
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&out[0])), n*sz), b)
+	return out
+}
+
+func decodePackedScalar(dt DataType, b []byte) (any, error) {
 	sz, ok := dt.Size()
 	if !ok || sz == 0 || len(b)%sz != 0 {
 		return nil, ErrCorrupt

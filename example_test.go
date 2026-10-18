@@ -76,3 +76,62 @@ func Example_roundTrip() {
 	// increment: 0.001
 	// start: 2020-01-02T03:04:05Z
 }
+
+func ExampleReadWaveform() {
+	start := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	buf := &bytes.Buffer{}
+	w, err := tdms.NewWriter(buf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	ch, err := w.Group("acq").Channel("ai0", tdms.TypeFloat64)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	err = ch.WriteWaveform(tdms.Waveform[float64]{
+		Start:     tdms.NewTimestamp(start),
+		Increment: 0.001,
+		Y:         []float64{0.1, 0.2, 0.3},
+		Unit:      "V",
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := w.Close(); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	f, err := tdms.NewReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer f.Close()
+	g, _ := f.Group("acq")
+	c, _ := g.Channel("ai0")
+	wf, err := tdms.ReadWaveform[float64](c)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	t0, _ := wf.Start.Time()
+	t1, _ := wf.TimeAt(1)
+	n, _ := c.SampleCount()
+	fmt.Println("samples:", wf.Y)
+	fmt.Println("unit:", wf.Unit)
+	fmt.Println("dt:", wf.Dt())
+	fmt.Println("t0:", t0.Format(time.RFC3339Nano))
+	fmt.Println("t1:", t1.Format(time.RFC3339Nano))
+	fmt.Println("wf_samples:", n)
+	// Output:
+	// samples: [0.1 0.2 0.3]
+	// unit: V
+	// dt: 1ms
+	// t0: 2024-06-01T12:00:00Z
+	// t1: 2024-06-01T12:00:00.001Z
+	// wf_samples: 3
+}

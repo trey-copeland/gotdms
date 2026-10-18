@@ -1,6 +1,7 @@
 package tdms
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -20,19 +21,27 @@ import (
 // whose next-segment offset is 0xFFFFFFFFFFFFFFFF — the NI incomplete-segment
 // sentinel — then patches the real length after the raw bytes are written. A
 // crash in between still leaves a segment the reader can consume up to EOF.
-// A writer that cannot seek buffers the finished segment and writes it once.
-// Either way, one segment is held in memory until Flush; flush often when
-// channels are large.
+// A writer that cannot seek writes the lead-in with the finished length, then
+// the bytes, because the length is known before the raw section is streamed.
+//
+// Samples passed to Write are encoded into the channel buffer and held until
+// Flush. Flush streams that buffer through a large bufio.Writer (see
+// WithWriteBuffer). It does not allocate a second copy of a contiguous
+// segment. Interleaved output is mixed in windows of about 1 MiB. Flush
+// often when a single chunk would be larger than memory: the channel buffer
+// itself is still one copy of the encoded samples.
 //
 // Segments are little-endian version 4713. SetInterleaved selects the layout
 // of later flushes. The writer is not safe for concurrent use.
 type Writer struct {
 	w        io.Writer
+	bw       *bufio.Writer
 	ws       io.WriteSeeker
 	pos      int64
 	seekable bool
 	own      io.Closer
 	path     string
+	bufSize  int
 
 	interleaved bool
 	closed      bool
@@ -106,14 +115,27 @@ func Create(path string) (*Writer, error) {
 }
 
 // NewWriter writes a TDMS file to w. If w implements io.WriteSeeker the
-// lead-in is patched in place; otherwise each segment is buffered until it
-// is complete. NewWriter does not close w.
-func NewWriter(w io.Writer) (*Writer, error) {
+// lead-in is patched in place; otherwise the lead-in carries the finished
+// length and the raw bytes are streamed after it. Output goes through a
+// buffer of DefaultWriteBuffer unless WithWriteBuffer says otherwise.
+// NewWriter does not close w.
+func NewWriter(w io.Writer, opts ...WriterOption) (*Writer, error) {
 	if w == nil {
 		return nil, wrap("write", "", fmt.Errorf("%w: nil writer", ErrArgument))
 	}
+	cfg := writerConfig{bufSize: DefaultWriteBuffer}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	if cfg.bufSize <= 0 {
+		cfg.bufSize = DefaultWriteBuffer
+	}
 	wr := &Writer{
 		w:         w,
+		bw:        bufio.NewWriterSize(w, cfg.bufSize),
+		bufSize:   cfg.bufSize,
 		root:      &wObj{path: "/"},
 		gindex:    map[string]*wGroup{},
 		prevIndex: map[string]wIndex{},
@@ -227,11 +249,11 @@ func (c *ChannelWriter) Write(values any) error {
 	if c.w.closed {
 		return wrap("write", c.ch.path, ErrClosed)
 	}
-	n, raw, strs, err := encodeChannel(c.ch.dt, values)
+	raw, strs, n, err := appendEncoded(c.ch.raw, c.ch.dt, values)
 	if err != nil {
 		return wrap("write", c.ch.path, err)
 	}
-	c.ch.raw = append(c.ch.raw, raw...)
+	c.ch.raw = raw
 	c.ch.strs = append(c.ch.strs, strs...)
 	c.ch.n += n
 	return nil
@@ -255,26 +277,26 @@ func (w *Writer) Flush() error {
 			return wrap("flush", w.path, err)
 		}
 	}
-	raw, err := buildRaw(data, w.interleaved)
+	rawSize, err := rawByteSize(data, w.interleaved)
 	if err != nil {
 		return wrap("flush", w.path, err)
 	}
-	meta, toc, order, indexes, err := w.buildMeta(data, len(raw) > 0)
+	meta, toc, order, indexes, err := w.buildMeta(data, rawSize > 0)
 	if err != nil {
 		return wrap("flush", w.path, err)
 	}
-	if len(raw) > 0 {
+	if rawSize > 0 {
 		toc |= TocRawData
 		if w.interleaved {
 			toc |= TocInterleavedData
 		}
 	}
-	if err := w.writeSegment(toc, meta, raw); err != nil {
+	if err := w.writeSegment(toc, meta, data, rawSize); err != nil {
 		return wrap("flush", w.path, err)
 	}
 	w.started = true
-	w.markEmitted(meta != nil || len(raw) > 0)
-	if len(raw) > 0 {
+	w.markEmitted(meta != nil || rawSize > 0)
+	if rawSize > 0 {
 		w.prevOrder = order
 		w.prevIndex = indexes
 	}
@@ -311,7 +333,7 @@ func (w *Writer) writeEmpty() error {
 		return err
 	}
 	toc := TocMetaData | TocNewObjList
-	if err := w.writeSegment(toc, meta, nil); err != nil {
+	if err := w.writeSegment(toc, meta, nil, 0); err != nil {
 		return wrap("flush", w.path, err)
 	}
 	w.started = true
@@ -320,46 +342,61 @@ func (w *Writer) writeEmpty() error {
 	return nil
 }
 
-func (w *Writer) writeSegment(toc uint32, meta, raw []byte) error {
+func (w *Writer) writeSegment(toc uint32, meta []byte, data []*wChannel, rawSize int64) error {
+	if rawSize < 0 {
+		return ErrCorrupt
+	}
+	if uint64(rawSize) > ^uint64(0)-uint64(len(meta)) {
+		return fmt.Errorf("%w: segment larger than uint64", ErrArgument)
+	}
+	rawLen := uint64(len(meta)) + uint64(rawSize)
 	if w.seekable {
 		// Publish the incomplete-segment sentinel first so a crash before the
-		// patch still satisfies the NI rule for the last segment.
+		// patch still satisfies the NI rule for the last segment. The buffer
+		// is flushed before the seek so the patch lands on bytes already in
+		// the underlying writer.
 		lead := encodeLeadIn(toc, incompleteSegment, uint64(len(meta)))
-		if _, err := w.ws.Write(lead); err != nil {
+		if _, err := w.bw.Write(lead); err != nil {
 			return err
 		}
-		if _, err := w.ws.Write(meta); err != nil {
+		if _, err := w.bw.Write(meta); err != nil {
 			return err
 		}
-		if _, err := w.ws.Write(raw); err != nil {
+		if err := writeRaw(w.bw, data, w.interleaved); err != nil {
+			return err
+		}
+		if err := w.bw.Flush(); err != nil {
 			return err
 		}
 		if _, err := w.ws.Seek(w.pos+12, io.SeekStart); err != nil {
 			return err
 		}
 		var next [8]byte
-		binary.LittleEndian.PutUint64(next[:], uint64(len(meta)+len(raw)))
+		binary.LittleEndian.PutUint64(next[:], rawLen)
 		if _, err := w.ws.Write(next[:]); err != nil {
 			return err
 		}
-		end := w.pos + int64(leadInSize+len(meta)+len(raw))
+		end := w.pos + int64(leadInSize) + int64(len(meta)) + rawSize
 		if _, err := w.ws.Seek(end, io.SeekStart); err != nil {
 			return err
 		}
 		w.pos = end
 		return nil
 	}
-	lead := encodeLeadIn(toc, uint64(len(meta)+len(raw)), uint64(len(meta)))
-	if _, err := w.w.Write(lead); err != nil {
+	lead := encodeLeadIn(toc, rawLen, uint64(len(meta)))
+	if _, err := w.bw.Write(lead); err != nil {
 		return err
 	}
-	if _, err := w.w.Write(meta); err != nil {
+	if _, err := w.bw.Write(meta); err != nil {
 		return err
 	}
-	if _, err := w.w.Write(raw); err != nil {
+	if err := writeRaw(w.bw, data, w.interleaved); err != nil {
 		return err
 	}
-	w.pos += int64(leadInSize + len(meta) + len(raw))
+	if err := w.bw.Flush(); err != nil {
+		return err
+	}
+	w.pos += int64(leadInSize) + int64(len(meta)) + rawSize
 	return nil
 }
 
@@ -627,49 +664,6 @@ func checkInterleaved(data []*wChannel) error {
 	return nil
 }
 
-func buildRaw(data []*wChannel, interleaved bool) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	if !interleaved || len(data) == 1 {
-		var raw []byte
-		var err error
-		for _, ch := range data {
-			if ch.dt == TypeString {
-				raw, err = appendStringBlock(raw, ch.strs)
-				if err != nil {
-					return nil, err
-				}
-				continue
-			}
-			raw = append(raw, ch.raw...)
-		}
-		return raw, nil
-	}
-	n := data[0].n
-	sizes := make([]int, len(data))
-	stride := 0
-	for i, ch := range data {
-		sz, ok := ch.dt.Size()
-		if !ok {
-			return nil, ErrLayout
-		}
-		sizes[i] = sz
-		stride += sz
-	}
-	raw := make([]byte, n*stride)
-	for i := 0; i < n; i++ {
-		dst := i * stride
-		for c, ch := range data {
-			sz := sizes[c]
-			src := i * sz
-			copy(raw[dst:dst+sz], ch.raw[src:src+sz])
-			dst += sz
-		}
-	}
-	return raw, nil
-}
-
 func prefixExtend(prev, cur []string) bool {
 	if len(cur) < len(prev) {
 		return false
@@ -750,231 +744,4 @@ func normalizeProp(name string, value any) (Property, error) {
 	default:
 		return Property{}, fmt.Errorf("%w: property %q has Go type %T", ErrType, name, value)
 	}
-}
-
-func encodeChannel(dt DataType, values any) (int, []byte, []string, error) {
-	if values == nil {
-		return 0, nil, nil, nil
-	}
-	switch dt.storage() {
-	case TypeInt8:
-		s, ok := values.([]int8)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		return len(s), append([]byte(nil), bytesOfInt8(s)...), nil, nil
-	case TypeUint8:
-		s, ok := values.([]uint8)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		return len(s), append([]byte(nil), s...), nil, nil
-	case TypeBool:
-		s, ok := values.([]bool)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		b := make([]byte, len(s))
-		for i, v := range s {
-			if v {
-				b[i] = 1
-			}
-		}
-		return len(s), b, nil, nil
-	case TypeInt16:
-		return pack16(values, true, dt)
-	case TypeUint16:
-		return pack16(values, false, dt)
-	case TypeInt32:
-		return pack32(values, dt, func(v any) ([]uint32, bool) {
-			s, ok := v.([]int32)
-			if !ok {
-				return nil, false
-			}
-			out := make([]uint32, len(s))
-			for i := range s {
-				out[i] = uint32(s[i])
-			}
-			return out, true
-		})
-	case TypeUint32:
-		return pack32(values, dt, func(v any) ([]uint32, bool) {
-			s, ok := v.([]uint32)
-			if !ok {
-				return nil, false
-			}
-			return s, true
-		})
-	case TypeFloat32:
-		return pack32(values, dt, func(v any) ([]uint32, bool) {
-			s, ok := v.([]float32)
-			if !ok {
-				return nil, false
-			}
-			out := make([]uint32, len(s))
-			for i := range s {
-				out[i] = math.Float32bits(s[i])
-			}
-			return out, true
-		})
-	case TypeInt64:
-		return pack64(values, dt, func(v any) ([]uint64, bool) {
-			s, ok := v.([]int64)
-			if !ok {
-				return nil, false
-			}
-			out := make([]uint64, len(s))
-			for i := range s {
-				out[i] = uint64(s[i])
-			}
-			return out, true
-		})
-	case TypeUint64:
-		return pack64(values, dt, func(v any) ([]uint64, bool) {
-			s, ok := v.([]uint64)
-			if !ok {
-				return nil, false
-			}
-			return s, true
-		})
-	case TypeFloat64:
-		return pack64(values, dt, func(v any) ([]uint64, bool) {
-			s, ok := v.([]float64)
-			if !ok {
-				return nil, false
-			}
-			out := make([]uint64, len(s))
-			for i := range s {
-				out[i] = math.Float64bits(s[i])
-			}
-			return out, true
-		})
-	case TypeString:
-		s, ok := values.([]string)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		cp := append([]string(nil), s...)
-		return len(cp), nil, cp, nil
-	case TypeTimestamp:
-		switch s := values.(type) {
-		case []Timestamp:
-			b := make([]byte, 0, len(s)*16)
-			for _, ts := range s {
-				b = appendTimestamp(b, ts)
-			}
-			return len(s), b, nil, nil
-		case []time.Time:
-			b := make([]byte, 0, len(s)*16)
-			for _, t := range s {
-				b = appendTimestamp(b, NewTimestamp(t))
-			}
-			return len(s), b, nil, nil
-		default:
-			return 0, nil, nil, typeErr(dt, values)
-		}
-	case TypeExtendedFloat:
-		s, ok := values.([]Extended)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		b := make([]byte, 0, len(s)*extendedSize)
-		for _, e := range s {
-			b = append(b, encodeExtended(e)...)
-		}
-		return len(s), b, nil, nil
-	case TypeComplex64:
-		s, ok := values.([]complex64)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		b := make([]byte, len(s)*8)
-		for i, c := range s {
-			binary.LittleEndian.PutUint32(b[i*8:], math.Float32bits(real(c)))
-			binary.LittleEndian.PutUint32(b[i*8+4:], math.Float32bits(imag(c)))
-		}
-		return len(s), b, nil, nil
-	case TypeComplex128:
-		s, ok := values.([]complex128)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		b := make([]byte, len(s)*16)
-		for i, c := range s {
-			binary.LittleEndian.PutUint64(b[i*16:], math.Float64bits(real(c)))
-			binary.LittleEndian.PutUint64(b[i*16+8:], math.Float64bits(imag(c)))
-		}
-		return len(s), b, nil, nil
-	case TypeVoid:
-		return 0, nil, nil, fmt.Errorf("%w: void channels have no values", ErrType)
-	default:
-		return 0, nil, nil, fmt.Errorf("%w: %s", ErrUnsupported, dt)
-	}
-}
-
-func bytesOfInt8(s []int8) []byte {
-	b := make([]byte, len(s))
-	for i, v := range s {
-		b[i] = byte(v)
-	}
-	return b
-}
-
-func pack16(values any, signed bool, dt DataType) (int, []byte, []string, error) {
-	var n int
-	var words []uint16
-	if signed {
-		s, ok := values.([]int16)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		n = len(s)
-		words = make([]uint16, n)
-		for i := range s {
-			words[i] = uint16(s[i])
-		}
-	} else {
-		s, ok := values.([]uint16)
-		if !ok {
-			return 0, nil, nil, typeErr(dt, values)
-		}
-		n = len(s)
-		words = s
-	}
-	b := make([]byte, n*2)
-	for i, w := range words {
-		binary.LittleEndian.PutUint16(b[i*2:], w)
-	}
-	return n, b, nil, nil
-}
-
-func pack32(values any, dt DataType, conv func(any) ([]uint32, bool)) (int, []byte, []string, error) {
-	words, ok := conv(values)
-	if !ok {
-		return 0, nil, nil, typeErr(dt, values)
-	}
-	b := make([]byte, len(words)*4)
-	for i, w := range words {
-		binary.LittleEndian.PutUint32(b[i*4:], w)
-	}
-	return len(words), b, nil, nil
-}
-
-func pack64(values any, dt DataType, conv func(any) ([]uint64, bool)) (int, []byte, []string, error) {
-	words, ok := conv(values)
-	if !ok {
-		return 0, nil, nil, typeErr(dt, values)
-	}
-	b := make([]byte, len(words)*8)
-	for i, w := range words {
-		binary.LittleEndian.PutUint64(b[i*8:], w)
-	}
-	return len(words), b, nil, nil
-}
-
-func appendTimestamp(b []byte, ts Timestamp) []byte {
-	var tmp [16]byte
-	binary.LittleEndian.PutUint64(tmp[0:8], ts.Fraction)
-	binary.LittleEndian.PutUint64(tmp[8:16], uint64(ts.Seconds))
-	return append(b, tmp[:]...)
 }

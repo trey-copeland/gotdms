@@ -229,6 +229,11 @@ func TestGoldenBigEndian(t *testing.T) {
 	g, _ := f.Group("g")
 	n, _ := g.Channel("n")
 	assertEqual(t, mustValues(t, n), []int32{0x01020304})
+	cur := n.Cursor(1)
+	if !cur.Next() {
+		t.Fatal(cur.Err())
+	}
+	assertEqual(t, cur.Values(), []int32{0x01020304})
 	ts, _ := g.Channel("t")
 	got := mustValues(t, ts).([]Timestamp)
 	if got[0].Seconds != 1 || got[0].Fraction != 0 {

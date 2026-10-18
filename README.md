@@ -56,7 +56,7 @@ return ch.Write([]float64{22.4, 22.8})
 
 `Create` and `NewWriter` buffer one segment. Repeated `Write` calls before `Flush` belong to the same chunk. `Close` flushes and, for `Create`, closes the file. An empty `Close` still writes a valid root segment.
 
-`bytes.Buffer` and other non-seekable writers buffer the finished segment and write it once. A seekable writer (`*os.File`) publishes the NI incomplete-segment sentinel (`0xFFFFFFFFFFFFFFFF`) in the next-segment offset, then patches the real length after the raw bytes are on disk. A crash in between leaves a last segment the reader can consume up to EOF.
+`bytes.Buffer` and other non-seekable writers write the lead-in with the finished length, then stream the raw bytes. A seekable writer (`*os.File`) publishes the NI incomplete-segment sentinel (`0xFFFFFFFFFFFFFFFF`) in the next-segment offset, then patches the real length after the raw bytes are on disk. A crash in between leaves a last segment the reader can consume up to EOF. Output goes through a 1 MiB buffer (`WithWriteBuffer`). Samples passed to `Write` stay in the channel buffer until `Flush`; flush does not allocate a second copy of a contiguous segment.
 
 `SetInterleaved(true)` multiplexes fixed-size channels sample by sample. Every channel in that chunk must have the same number of values. See the matrix below for strings.
 
@@ -92,24 +92,54 @@ for cur.Next() {
 return cur.Err()
 ```
 
-`Open` and `NewReader` parse every segment's metadata and do not load raw samples. `NewReader` accepts an `io.ReaderAt` that can report its length (`*os.File`, `*bytes.Reader`, `*io.SectionReader`, or any `io.Seeker`). Value reads use `ReadAt`, so concurrent reads are safe when the underlying reader is.
+`Open` and `NewReader` parse every segment's metadata and do not load raw samples. `NewReader` accepts an `io.ReaderAt` that can report its length (`*os.File`, `*bytes.Reader`, `*io.SectionReader`, or any `io.Seeker`). `Values` and the typed helpers read through `ReadAt`, so concurrent reads are safe when the underlying reader is. `Cursor` scans sequentially through a 256 KiB buffer (`WithReadBuffer`).
 
 `Values` returns a freshly allocated slice in the channel's native Go type (`[]int32`, `[]float64`, `[]string`, `[]Timestamp`, `[]bool`, …). `Float64s` converts numeric channels. `Times` converts timestamp channels to UTC `time.Time` at nanosecond resolution. `Timestamps` keeps the full 2^-64 fraction.
 
-Waveform properties are ordinary properties plus helpers: `Unit` (`unit_string`, then `NI_UnitDescription`), `Increment` (`wf_increment`), `StartTime` (`wf_start_time`), `SampleCount` (`wf_samples`). `LinearScale` reads the first `NI_Scale[0]`…`NI_Scale[8]` linear scale. NI's own example uses `NI_Scale[1]_…`. Nothing is applied automatically; call `Apply` on raw samples.
+Waveform properties are ordinary properties plus helpers: `Unit` (`unit_string`, then `NI_UnitDescription`), `Increment` (`wf_increment`), `StartTime` (`wf_start_time`), `SampleCount` (`wf_samples`). `LinearScale` reads the first `NI_Scale[0]`…`NI_Scale[8]` linear scale. NI's own example uses `NI_Scale[1]_…`. Nothing is applied automatically; call `Apply`, `ApplyScale`, or `ScaledWaveform` when engineering units are wanted. See [Waveforms](#waveforms).
 
-Runnable copies of the snippets live in `examples/write`, `examples/read`, and `Example_roundTrip` (checked by `go test`).
+Runnable copies of the snippets live in `examples/write`, `examples/read`, `Example_roundTrip`, and `ExampleReadWaveform` (checked by `go test`).
+
+## Waveforms
+
+LabVIEW does not store an analog waveform as its own TDMS type. A waveform is a channel's Y samples plus `wf_start_time`, `wf_increment` (float64 seconds), `wf_samples`, and `unit_string`. `Waveform[T]` is that bundle. `T` is `float64`, `float32`, or an integer width (`int8` through `uint64`). Bool, string, timestamp, extended, and complex channels are not waveforms.
+
+`Start` is a `Timestamp`, not a `time.Time`. That keeps the full 2^-64 second fraction across a round trip. Call `Start.Time` for UTC at nanosecond resolution. `Increment` is the stored `wf_increment`. `Dt` rounds it to the nearest `time.Duration` and is only a convenience.
+
+A missing `wf_start_time` or `wf_increment` is not an error. The field is the zero value and `HasStart` or `HasIncrement` is false. A stored zero is a real value: `HasStart` true with a zero `Timestamp` is the TDMS epoch (1904-01-01 UTC), and `HasIncrement` true with increment 0 means every sample is at t0. `TimeAt(i)` computes t0 + i*dt in one step, not by adding dt over and over. `Times` returns one `time.Time` per sample.
+
+`ReadWaveform[T]` and `Channel.Waveform` (float64 only) load every sample, same as `Values`. They do not apply a linear scale. `ApplyScale` and `ScaledWaveform` do, and they return `Waveform[float64]`. `WriteWaveform` writes Y unchanged — it does not invert a scale — and sets `wf_start_time`, `wf_increment`, `wf_samples` (`len(Y)`), and, when the unit is non-empty, `unit_string`, in that order. An empty unit does not clear a `unit_string` already set on the channel.
+
+`ReadWaveform` is the wrong call for a multi-gigabyte channel. Take `WaveformHeader` (no samples) and walk the channel with `Cursor`. `WaveformHeader.TimeAt` takes the channel's absolute sample index, so a chunk that starts at sample 4096 is `header.TimeAt(4096 + i)`.
+
+```go
+start := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+err = ch.WriteWaveform(tdms.Waveform[float64]{
+    Start:     tdms.NewTimestamp(start),
+    Increment: 0.001,
+    Y:         []float64{0.1, 0.2, 0.3},
+    Unit:      "V",
+})
+// ...
+wf, err := tdms.ReadWaveform[float64](c)
+t1, _ := wf.TimeAt(1) // 2024-06-01T12:00:00.001Z
+```
+
+`ExampleReadWaveform` is the compile-checked copy.
 
 ## API
 
 | Piece | Role |
 | --- | --- |
 | `Open`, `NewReader`, `File` | Read a file. `Groups`, `Group`, `Properties` at file level. `Version`, `SegmentCount`. |
-| `Group`, `Channel` | Names, paths, properties, `Values`, `Cursor`, typed helpers. |
-| `Create`, `NewWriter`, `Writer` | `SetProperty`, `Group`, `SetInterleaved`, `Flush`, `Close`. |
-| `GroupWriter`, `ChannelWriter` | `SetProperty`, `Channel`, `Write`. |
+| `Group`, `Channel` | Names, paths, properties, `Values`, `Cursor`, typed helpers, `Waveform`, `WaveformHeader`. |
+| `Create`, `NewWriter`, `Writer` | `SetProperty`, `Group`, `SetInterleaved`, `Flush`, `Close`. `WithWriteBuffer` (default 1 MiB). |
+| `GroupWriter`, `ChannelWriter` | `SetProperty`, `Channel`, `Write`, `WriteWaveform`. |
+| `Waveform[T]`, `ReadWaveform`, `ScaledWaveform` | Analog waveform. `ApplyScale` applies a `LinearScale` explicitly. |
+| `WaveformHeader` | t0, dt, unit, and `wf_samples` without loading Y. `TimeAt` timestamps cursor batches. |
 | `DataType` | NI `tdsDataType` codes. `String`, `Size`. |
 | `Property`, `Timestamp`, `Extended`, `LinearScale` | Values and conversions. |
+| `WithReadBuffer` | Sequential buffer for `Cursor` (default 256 KiB). `Values` stays on `ReadAt`. |
 | `Error` and `Err*` | Wrapped errors. Use `errors.Is`. |
 
 Channel order inside a segment is creation order on the writer, which is the order objects first appear on the reader. `Write` does not reorder channels.
@@ -177,11 +207,36 @@ Public operations return `*Error` with an operation name and, when there is one,
 
 ## Performance
 
-Metadata parsing reads the lead-in and the metadata bytes of each segment. Raw samples stay on the `io.ReaderAt` until `Values`, a typed helper, or `Cursor`. A cursor yields at most `batch` values per `Next` (default 4096) and does not retain earlier batches.
+Metadata parsing reads the lead-in and the metadata bytes of each segment. Raw samples stay on the `io.ReaderAt` until `Values`, a typed helper, or `Cursor`.
 
-The writer holds the current segment's samples until `Flush`. Flush often for large channels. Non-seekable writers also hold the encoded segment for the duration of the flush. Seekable writers write the bytes once and patch eight bytes of the lead-in.
+`Values` issues `ReadAt` for the bytes it needs. A contiguous numeric channel on a little-endian machine is copied straight into the result slice: there is no intermediate `[]byte` and no per-sample `binary.Read`. Big-endian segments are byte-swapped in place after that read. A big-endian host uses the scalar decoder instead of the copy; `decodePackedScalar` is checked against the bulk path in tests. Bools, timestamps, and 80-bit extended values stay on the scalar path everywhere, because their Go layout is not the on-disk layout.
 
-`BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `go test -bench=. -benchmem` reports throughput on the machine running them.
+`Cursor` does not use that one-shot `ReadAt`. It reads ahead through a pooled buffer, 256 KiB by default (`WithReadBuffer`), and reuses the batch slice (`Values` is valid only until the next `Next`). A read at least as large as the buffer skips the cache and goes to `ReadAt`. This package does not mmap. A mapping delivers `SIGBUS` if the file is truncated, and it is a poorer default on 32-bit and non-Unix targets.
+
+Interleaved fixed-size channels are split out in about 1 MiB windows rather than by allocating the whole multiplexed span once per channel. String channels and mixed-width layouts use the same windowed copy; the string offset table is unchanged.
+
+`Write` encodes into the channel buffer. On a little-endian machine that encode is a bulk copy. `Flush` computes the raw size (including a string offset table) and streams metadata, then raw bytes, through a 1 MiB `bufio.Writer` (`WithWriteBuffer`). A contiguous flush does not allocate a second copy of the segment. Interleaved output is mixed in a window of about 1 MiB. Seekable writers still publish the incomplete-segment sentinel and patch eight bytes of the lead-in after the buffer is flushed. The channel buffer itself is one copy of the encoded samples until `Flush`; call `Flush` before a chunk outgrows memory. String payload is streamed at flush. Per-string headers are still allocated on read; a CPU profile of numeric multi-hundred-megabyte files did not show that path, so it was left alone.
+
+There is no mmap switch. The defaults above are the fast path; the options only change buffer size.
+
+`BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `BenchmarkLargeReadFloat64`, `BenchmarkLargeReadFloat64File`, `BenchmarkLargeCursorFile`, `BenchmarkLargeInterleaved`, `BenchmarkLargeWriteFile`, and `BenchmarkLargeWriteMem` move 128 MiB (four float64 channels for the interleaved case). They run only under `-bench`.
+
+```bash
+go test -bench=BenchmarkLarge -benchmem -count=3
+```
+
+The numbers below are the median of three `-benchtime=1x` runs on one KVM virtual machine: Intel Xeon (family 6, model 207), 4 vCPU, linux/amd64, Go 1.22.2. They are indicative, not a hardware claim. "Before" is the same benchmark shape on the library as first imported, measured on this VM before the buffered reader, bulk copy, and streaming writer.
+
+| Benchmark | Before | After |
+| --- | --- | --- |
+| Contiguous float64 `Values`, in memory | 2092 MB/s, 256 MiB/op, 30 allocs/op | 5285 MB/s, 128 MiB/op, 30 allocs/op |
+| Contiguous float64 `Values`, `os.File` | 1833 MB/s, 256 MiB/op, 34 allocs/op | 4268 MB/s, 128 MiB/op, 34 allocs/op |
+| `Cursor` over `os.File`, batch 4096 | 1927 MB/s, 256 MiB/op, 12319 allocs/op | 7343 MB/s, 386 KiB/op, 4135 allocs/op |
+| 4 interleaved float64 channels, in memory | 348 MB/s, 768 MiB/op, 65 allocs/op | 1113 MB/s, 128 MiB/op, 573 allocs/op |
+| Write one float64 channel, `os.File` | 985 MB/s, 512 MiB/op, 44 allocs/op | 2221 MB/s, 129 MiB/op, 44 allocs/op |
+| Write one float64 channel, `bytes.Buffer` | 804 MB/s, 640 MiB/op, 41 allocs/op | 2477 MB/s, 258 MiB/op, 40 allocs/op |
+
+`b.SetBytes` is the raw sample payload (128 MiB, or 128 MiB across the four interleaved channels). The cursor's allocation drop is the reused batch buffer: one scan no longer allocates a fresh slice per batch. The in-memory write still allocates the encoded channel buffer plus the destination `bytes.Buffer`.
 
 ## Layout of the package
 

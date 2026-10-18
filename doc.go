@@ -16,9 +16,12 @@
 //
 // Open or NewReader parses every segment's metadata up front and does not load
 // raw data. Channel values are read on demand with Values, the typed helpers
-// (Float64s, Times, Strings, …), or a Cursor that yields batches. The
-// underlying reader must implement io.ReaderAt (os.File and bytes.Reader do).
-// Concurrent value reads are safe when the ReaderAt is.
+// (Float64s, Times, Strings, …), or a Cursor that yields batches. Analog
+// waveforms (t0, dt, Y, unit) are ReadWaveform / Channel.Waveform; they load
+// every sample. Cursor plus WaveformHeader timestamps a channel in chunks.
+// The underlying reader must implement io.ReaderAt (os.File and bytes.Reader do).
+// Concurrent value reads are safe when the ReaderAt is. Cursor scans use a
+// sequential buffer; Values uses ReadAt.
 //
 // # Writing
 //
@@ -29,7 +32,9 @@
 // seekable writer publishes an incomplete-segment lead-in (next-segment offset
 // 0xFFFFFFFFFFFFFFFF) and patches the real offset after the raw data is on
 // disk, so a crash mid-segment still matches the rule in the NI article. A
-// non-seekable writer buffers the finished segment and writes it once.
+// non-seekable writer writes the lead-in with the finished length, then streams
+// the raw bytes. Samples passed to Write stay in the channel buffer until Flush.
+// Flush itself streams that buffer and does not allocate a second full copy.
 //
 // Files are little-endian, version 4713 (TDMS 2.0). Big-endian segments are
 // accepted on read. DAQmx raw data is detected and rejected with ErrDAQmx
