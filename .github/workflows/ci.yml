@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (ubuntu, go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.22", "1.27"]
+        include:
+          - go: "1.22"
+            race: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: race (root package)
+        if: matrix.race
+        run: go test -race .
+      # dataset/ is added by the dataset-layer PR. go test ./... covers it
+      # once it exists; this step adds the race run only then.
+      - name: race (dataset, when present)
+        if: matrix.race
+        run: |
+          if [ -d dataset ]; then
+            go test -race ./dataset/
+          else
+            echo "dataset/ is not in this tree; skipping"
+          fi
+
+  windows:
+    name: test (windows, go 1.22)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: test
+        run: go test ./...

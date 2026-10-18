@@ -1,5 +1,7 @@
 # gotdms
 
+[![CI](https://github.com/trey-copeland/gotdms/actions/workflows/ci.yml/badge.svg)](https://github.com/trey-copeland/gotdms/actions/workflows/ci.yml)
+
 A pure Go reader and writer for NI TDMS 2.0 files. No cgo. The Go package name is `tdms`; the module path is `github.com/trey-copeland/gotdms`.
 
 TDMS (Technical Data Management Streaming) is the binary format LabVIEW and other National Instruments tools use for measurement data. A file is a sequence of segments. Each segment has a 28-byte lead-in, optional metadata (object paths, raw-data indexes, properties), and optional raw samples. Objects form a tree of one file (`/`), any number of groups (`/'Group'`), and channels (`/'Group'/'Channel'`). Only channels hold raw data.
