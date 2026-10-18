@@ -3,6 +3,7 @@ package tdms
 import (
 	"bytes"
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -293,6 +294,66 @@ func BenchmarkLargeInterleaved(b *testing.B) {
 		g, _ := f.Group("g")
 		for c := 0; c < chans; c++ {
 			ch, _ := g.Channel(string(rune('a' + c)))
+			v, err := ch.Float64s()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(v) != n || v[n-1] != cols[c][n-1] {
+				b.Fatalf("chan %d len %d", c, len(v))
+			}
+		}
+		f.Close()
+	}
+}
+
+// BenchmarkLargeInterleavedMany is 32 float64 channels, 1<<16 samples each
+// (16 MiB total). It is the wide-multiplex case: stride grows with channel
+// count, and each channel rereads the shared span. On demand, like the other
+// BenchmarkLarge cases.
+func BenchmarkLargeInterleavedMany(b *testing.B) {
+	const n = 1 << 16
+	const chans = 32
+	cols := make([][]float64, chans)
+	for c := 0; c < chans; c++ {
+		cols[c] = make([]float64, n)
+		for i := range cols[c] {
+			cols[c][i] = float64(c*n + i)
+		}
+	}
+	buf := &bytes.Buffer{}
+	w, err := NewWriter(buf)
+	if err != nil {
+		b.Fatal(err)
+	}
+	w.SetInterleaved(true)
+	for c := 0; c < chans; c++ {
+		ch, err := w.Group("g").Channel("c"+strconv.Itoa(c), TypeFloat64)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := ch.Write(cols[c]); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		b.Fatal(err)
+	}
+	raw := append([]byte(nil), buf.Bytes()...)
+	names := make([]string, chans)
+	for c := range names {
+		names[c] = "c" + strconv.Itoa(c)
+	}
+	b.SetBytes(int64(n) * 8 * chans)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		f, err := NewReader(bytes.NewReader(raw))
+		if err != nil {
+			b.Fatal(err)
+		}
+		g, _ := f.Group("g")
+		for c := 0; c < chans; c++ {
+			ch, _ := g.Channel(names[c])
 			v, err := ch.Float64s()
 			if err != nil {
 				b.Fatal(err)

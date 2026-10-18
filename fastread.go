@@ -215,12 +215,24 @@ func (c *Channel) fillPacked(r io.ReaderAt, start, n, size int, dst []byte) erro
 }
 
 func deinterleave(dst, src []byte, size, stride, n int) {
+	if n <= 0 || size <= 0 {
+		return
+	}
+	// Contiguous span: one move. Interleaved values are pulled out of a
+	// stride window. When every sample of this width stays naturally aligned,
+	// copy a machine word instead of one byte at a time. Mixed-width layouts
+	// whose stride is not a multiple of the sample width stay on the byte path
+	// so an unaligned access is never performed.
 	switch size {
 	case 1:
 		for i := 0; i < n; i++ {
 			dst[i] = src[i*stride]
 		}
 	case 2:
+		if wordAligned(dst, src, stride, 2) {
+			deinterleave16(dst, src, stride, n)
+			return
+		}
 		for i := 0; i < n; i++ {
 			s := i * stride
 			d := i * 2
@@ -228,6 +240,10 @@ func deinterleave(dst, src []byte, size, stride, n int) {
 			dst[d+1] = src[s+1]
 		}
 	case 4:
+		if wordAligned(dst, src, stride, 4) {
+			deinterleave32(dst, src, stride, n)
+			return
+		}
 		for i := 0; i < n; i++ {
 			s := i * stride
 			d := i * 4
@@ -237,6 +253,10 @@ func deinterleave(dst, src []byte, size, stride, n int) {
 			dst[d+3] = src[s+3]
 		}
 	case 8:
+		if wordAligned(dst, src, stride, 8) {
+			deinterleave64(dst, src, stride, n)
+			return
+		}
 		for i := 0; i < n; i++ {
 			s := i * stride
 			d := i * 8
@@ -250,14 +270,70 @@ func deinterleave(dst, src []byte, size, stride, n int) {
 			dst[d+7] = src[s+7]
 		}
 	case 16:
+		if wordAligned(dst, src, stride, 8) {
+			deinterleave128(dst, src, stride, n)
+			return
+		}
 		for i := 0; i < n; i++ {
 			s := i * stride
-			d := i * 16
-			copy(dst[d:d+16], src[s:s+16])
+			copy(dst[i*16:i*16+16], src[s:s+16])
 		}
 	default:
 		for i := 0; i < n; i++ {
-			copy(dst[i*size:(i+1)*size], src[i*stride:i*stride+size])
+			s := i * stride
+			copy(dst[i*size:(i+1)*size], src[s:s+size])
 		}
+	}
+}
+
+// wordAligned reports whether sample 0 is align-byte aligned and every later
+// sample stays aligned. dst and src are the packed destination and the
+// strided window; both are indexed from the first byte of this channel.
+func wordAligned(dst, src []byte, stride, align int) bool {
+	if align <= 0 || len(dst) == 0 || len(src) == 0 || stride%align != 0 {
+		return false
+	}
+	return uintptr(unsafe.Pointer(&dst[0]))%uintptr(align) == 0 &&
+		uintptr(unsafe.Pointer(&src[0]))%uintptr(align) == 0
+}
+
+func deinterleave16(dst, src []byte, stride, n int) {
+	_ = dst[n*2-1]
+	_ = src[(n-1)*stride+1]
+	for i := 0; i < n; i++ {
+		s := i * stride
+		d := i * 2
+		*(*uint16)(unsafe.Pointer(&dst[d])) = *(*uint16)(unsafe.Pointer(&src[s]))
+	}
+}
+
+func deinterleave32(dst, src []byte, stride, n int) {
+	_ = dst[n*4-1]
+	_ = src[(n-1)*stride+3]
+	for i := 0; i < n; i++ {
+		s := i * stride
+		d := i * 4
+		*(*uint32)(unsafe.Pointer(&dst[d])) = *(*uint32)(unsafe.Pointer(&src[s]))
+	}
+}
+
+func deinterleave64(dst, src []byte, stride, n int) {
+	_ = dst[n*8-1]
+	_ = src[(n-1)*stride+7]
+	for i := 0; i < n; i++ {
+		s := i * stride
+		d := i * 8
+		*(*uint64)(unsafe.Pointer(&dst[d])) = *(*uint64)(unsafe.Pointer(&src[s]))
+	}
+}
+
+func deinterleave128(dst, src []byte, stride, n int) {
+	_ = dst[n*16-1]
+	_ = src[(n-1)*stride+15]
+	for i := 0; i < n; i++ {
+		s := i * stride
+		d := i * 16
+		*(*uint64)(unsafe.Pointer(&dst[d])) = *(*uint64)(unsafe.Pointer(&src[s]))
+		*(*uint64)(unsafe.Pointer(&dst[d+8])) = *(*uint64)(unsafe.Pointer(&src[s+8]))
 	}
 }

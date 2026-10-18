@@ -428,6 +428,67 @@ func TestCreateOpen(t *testing.T) {
 	}
 }
 
+func TestCursorFloat64sAliasesBatch(t *testing.T) {
+	var buf bytes.Buffer
+	w := newBufWriter(t, &buf)
+	ch := mustCh(t, w, "g", "c", TypeFloat64)
+	vals := []float64{1, 2, 3, 4, 5, 6, 7, 8}
+	if err := ch.Write(vals); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := openBytes(t, buf.Bytes())
+	c, _ := f.Group("g")
+	chR, _ := c.Channel("c")
+	cur := chR.Cursor(4)
+	if !cur.Next() {
+		t.Fatal(cur.Err())
+	}
+	held, err := cur.Float64s()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held[0] != 1 {
+		t.Fatalf("first batch %v", held)
+	}
+	if !cur.Next() {
+		t.Fatal(cur.Err())
+	}
+	// The cursor reuses one []float64. Callers that keep Float64s across Next
+	// observe the next batch, which is why the doc says to copy.
+	if held[0] == 1 {
+		t.Fatal("float64 Float64s did not alias the reused batch")
+	}
+	if held[0] != 5 || held[3] != 8 {
+		t.Fatalf("aliased batch = %v", held)
+	}
+}
+
+func TestMixedWidthInterleaved(t *testing.T) {
+	var buf bytes.Buffer
+	w := newBufWriter(t, &buf)
+	w.SetInterleaved(true)
+	a := mustCh(t, w, "g", "a", TypeInt16)
+	b := mustCh(t, w, "g", "b", TypeFloat64)
+	if err := a.Write([]int16{1, 2, 3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Write([]float64{10, 20, 30, 40}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := openBytes(t, buf.Bytes())
+	g, _ := f.Group("g")
+	gotA, _ := g.Channel("a")
+	gotB, _ := g.Channel("b")
+	assertEqual(t, mustValues(t, gotA), []int16{1, 2, 3, 4})
+	assertEqual(t, mustValues(t, gotB), []float64{10, 20, 30, 40})
+}
+
 func TestCursorMatchesValues(t *testing.T) {
 	var buf bytes.Buffer
 	w := newBufWriter(t, &buf)

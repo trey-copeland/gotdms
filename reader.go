@@ -335,6 +335,8 @@ func (cur *Cursor) Values() any { return cur.cur }
 func (cur *Cursor) Len() int { return sliceLen(cur.cur) }
 
 // Float64s converts the current batch with the same rules as Channel.Float64s.
+// A float64 channel returns the batch slice itself. That slice aliases Values
+// and is valid only until the next Next call; retain it with a copy.
 func (cur *Cursor) Float64s() ([]float64, error) {
 	if cur.cur == nil {
 		return nil, wrap("read", cur.ch.path, ErrArgument)
