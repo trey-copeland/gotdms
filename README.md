@@ -199,7 +199,7 @@ Relative time is `sample_time - basis` in seconds. It is zero only at the basis,
 
 A step backwards in a timestamp channel returns `ErrMonotonic`. Equal timestamps stay in file order inside a file; across files they follow the overlap policy. The same channel name in several groups returns `*AmbiguousError` unless `Selector.Group` is set. Files are merged in time order. The window is half-open (`start <= t < end`). `OverlapKeepFirst` is the default. Gaps are reported and are not filled with NaN. `Resample` (`InterpLinear`, `InterpPrevious`) is opt-in and does not extrapolate.
 
-When a group has no timestamp declaration, `StartTime` and `Increment` (`wf_start_time`, `wf_increment`) supply the axis. Sample `i` is that start plus `i` times the increment, rounded to the nearest nanosecond. The core reader has no sample seek, so a waveform window decodes from the first sample and stops at the window. Declared timestamp values are decoded in full, because the times are the samples.
+When a group has no timestamp declaration, `StartTime` and `Increment` (`wf_start_time`, `wf_increment`) supply the axis. Sample `i` is that start plus `i` times the increment, rounded to the nearest nanosecond. The core reader has no sample seek, so a waveform window decodes from the first sample and stops at the window. Declared timestamp values are decoded in full on read, because the times are the samples. Catalog decodes them to compute the span and then discards the samples. `ReadMany` opens each file once and decodes a shared timestamp channel once per call.
 
 ```go
 ds, err := dataset.OpenGlob(dir, "*.tdms",
@@ -218,7 +218,7 @@ for _, s := range series {
 }
 ```
 
-`Example` in package `dataset` is the compile-checked copy: 100 files, a global timestamp channel, find without a group, one window, and relative times against an explicit trigger. `BenchmarkCatalog` indexes 100 one-sample files and runs only under `go test -bench`.
+`Example` in package `dataset` is the compile-checked copy: 100 files, a global timestamp channel, find without a group, one window, and relative times against an explicit trigger. Benchmarks run only under `go test -bench`. `BenchmarkCatalog` indexes 100 one-sample files. `BenchmarkCatalogSharedClock`, `BenchmarkReadManySharedClock`, and `BenchmarkReadWindowTail` use a 2^20-sample clock and are the large-file cases.
 
 ## License
 

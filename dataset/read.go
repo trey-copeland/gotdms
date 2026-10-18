@@ -1,8 +1,11 @@
 package dataset
 
 import (
+	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/trey-copeland/gotdms"
@@ -161,19 +164,23 @@ func readTimestampAxis(g *tdms.Group, ch *tdms.Channel, o Occurrence, opt option
 			return piece{}, ErrNotFound
 		}
 	}
-	times, usable, err := loadDeclaredTimes(axis, opt)
+	// wantY only when this call's series is the clock. A data channel must not
+	// decode the axis a second time to build Y.
+	times, axisY, err := loadAxis(axis, opt, o.IsTimestamp)
 	if err != nil {
 		return piece{}, err
-	}
-	if !usable {
-		return piece{}, ErrUntimed
 	}
 	if err := checkMonotonic(times); err != nil {
 		return piece{}, err
 	}
-	y, err := valuesForAxis(ch, o.IsTimestamp)
-	if err != nil {
-		return piece{}, err
+	var y []float64
+	if o.IsTimestamp {
+		y = axisY
+	} else {
+		y, err = ch.Float64s()
+		if err != nil {
+			return piece{}, err
+		}
 	}
 	if len(y) != len(times) {
 		return piece{}, ErrArgument
@@ -182,34 +189,18 @@ func readTimestampAxis(g *tdms.Group, ch *tdms.Channel, o Occurrence, opt option
 	if d, ok := uniformDt(times); ok {
 		dt = d
 	}
-	p := piece{file: o.File, dt: dt, timed: true}
-	for i := range y {
-		if window && (times[i].Before(start) || !times[i].Before(end)) {
-			continue
-		}
-		p.y = append(p.y, y[i])
-		p.times = append(p.times, times[i])
+	i0, i1 := timeWindow(times, start, end, window)
+	p := piece{
+		file:  o.File,
+		dt:    dt,
+		timed: true,
+		y:     clipFloat(y, i0, i1, false),
+		times: clipTime(times, i0, i1, false),
 	}
 	if len(p.times) > 0 {
 		p.start = p.times[0]
 	}
 	return p, nil
-}
-
-func valuesForAxis(ch *tdms.Channel, isTimestamp bool) ([]float64, error) {
-	if isTimestamp && ch.DataType() == tdms.TypeTimestamp {
-		// Y is seconds since the Unix epoch. RelativeTimes uses Times, not Y.
-		times, err := ch.Times()
-		if err != nil {
-			return nil, err
-		}
-		out := make([]float64, len(times))
-		for i, t := range times {
-			out[i] = float64(t.UnixNano()) / 1e9
-		}
-		return out, nil
-	}
-	return ch.Float64s()
 }
 
 func checkMonotonic(times []time.Time) error {
@@ -219,6 +210,292 @@ func checkMonotonic(times []time.Time) error {
 		}
 	}
 	return nil
+}
+
+func timeWindow(times []time.Time, start, end time.Time, window bool) (int, int) {
+	if !window {
+		return 0, len(times)
+	}
+	i0 := sortSearch(times, start)
+	i1 := sortSearch(times, end)
+	if i1 < i0 {
+		return i0, i0
+	}
+	return i0, i1
+}
+
+func sortSearch(times []time.Time, target time.Time) int {
+	lo, hi := 0, len(times)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if times[mid].Before(target) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// clipFloat returns src[i0:i1]. shared means another series still holds src,
+// so the result must be its own backing array. A partial window is always
+// copied so the full channel can be released.
+func clipFloat(src []float64, i0, i1 int, shared bool) []float64 {
+	if i1 < i0 {
+		i1 = i0
+	}
+	n := i1 - i0
+	if n == 0 || i0 > len(src) {
+		return nil
+	}
+	if i1 > len(src) {
+		i1 = len(src)
+		n = i1 - i0
+	}
+	if !shared && i0 == 0 && i1 == len(src) {
+		return src
+	}
+	out := make([]float64, n)
+	copy(out, src[i0:i1])
+	return out
+}
+
+func clipTime(src []time.Time, i0, i1 int, shared bool) []time.Time {
+	if i1 < i0 {
+		i1 = i0
+	}
+	n := i1 - i0
+	if n == 0 || i0 > len(src) {
+		return nil
+	}
+	if i1 > len(src) {
+		i1 = len(src)
+		n = i1 - i0
+	}
+	if !shared && i0 == 0 && i1 == len(src) {
+		return src
+	}
+	out := make([]time.Time, n)
+	copy(out, src[i0:i1])
+	return out
+}
+
+type readSlot struct {
+	piece piece
+	err   error
+}
+
+type fileRead struct {
+	path    string
+	once    sync.Once
+	f       *tdms.File
+	err     error
+	clocks  map[string]*clockRead
+	pending int32
+}
+
+type clockRead struct {
+	once    sync.Once
+	times   []time.Time
+	y       []float64
+	dt      float64
+	i0, i1  int
+	err     error
+	users   int
+	tsUsers int
+}
+
+func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.Time) ([]Series, error) {
+	type plan struct {
+		hits  []Occurrence
+		slots []int
+	}
+	plans := make([]plan, len(sels))
+	var slots []readSlot
+	files := map[string]*fileRead{}
+	var items []readItem
+	for i, sel := range sels {
+		hits, err := d.resolve(sel)
+		if err != nil {
+			return nil, err
+		}
+		for j := 1; j < len(hits); j++ {
+			if hits[j].Timed != hits[0].Timed || hits[j].Source != hits[0].Source || hits[j].IsTimestamp != hits[0].IsTimestamp {
+				return nil, fmt.Errorf("%w: %q group %q has mixed time axes", ErrArgument, hits[0].Name, hits[0].Group)
+			}
+		}
+		if err := validateWindow(hits, true); err != nil {
+			return nil, err
+		}
+		plans[i].hits = hits
+		plans[i].slots = make([]int, len(hits))
+		for hi, o := range hits {
+			if !hitsWindow(o, start, end) {
+				plans[i].slots[hi] = -1
+				continue
+			}
+			fr := files[o.File]
+			if fr == nil {
+				fr = &fileRead{path: o.File, clocks: map[string]*clockRead{}}
+				files[o.File] = fr
+			}
+			if o.Source == TimeTimestamp {
+				name := o.Timestamp
+				if o.IsTimestamp {
+					name = o.Name
+				}
+				key := o.Group + "\x00" + name
+				ck := fr.clocks[key]
+				if ck == nil {
+					ck = &clockRead{}
+					fr.clocks[key] = ck
+				}
+				ck.users++
+				if o.IsTimestamp {
+					ck.tsUsers++
+				}
+			}
+			id := len(slots)
+			slots = append(slots, readSlot{})
+			plans[i].slots[hi] = id
+			items = append(items, readItem{slot: id, o: o, fr: fr})
+		}
+	}
+	for _, it := range items {
+		it.fr.pending++
+	}
+	run(d.opt.readWorkers, len(items), func(i int) {
+		items[i].run(slots, d.opt, start, end)
+	})
+	out := make([]Series, len(sels))
+	for i, sel := range sels {
+		pieces := make([]piece, 0, len(plans[i].hits))
+		for hi, o := range plans[i].hits {
+			id := plans[i].slots[hi]
+			if id < 0 {
+				continue
+			}
+			if err := slots[id].err; err != nil {
+				return nil, fmt.Errorf("dataset: read %s %q/%q: %w", o.File, o.Group, o.Name, err)
+			}
+			pieces = append(pieces, slots[id].piece)
+		}
+		merged, err := d.finish(sel, plans[i].hits, pieces, basis)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = merged
+	}
+	return out, nil
+}
+
+type readItem struct {
+	slot int
+	o    Occurrence
+	fr   *fileRead
+}
+
+func (it readItem) run(slots []readSlot, opt options, start, end time.Time) {
+	defer it.fr.done()
+	it.fr.open()
+	if it.fr.err != nil {
+		slots[it.slot].err = it.fr.err
+		return
+	}
+	p, err := readItemPiece(it.fr, it.o, opt, start, end)
+	slots[it.slot].piece = p
+	slots[it.slot].err = err
+}
+
+func (fr *fileRead) open() {
+	fr.once.Do(func() {
+		fr.f, fr.err = tdms.Open(fr.path)
+	})
+}
+
+func (fr *fileRead) done() {
+	if atomic.AddInt32(&fr.pending, -1) == 0 && fr.f != nil {
+		fr.f.Close()
+	}
+}
+
+func readItemPiece(fr *fileRead, o Occurrence, opt options, start, end time.Time) (piece, error) {
+	g, ok := fr.f.Group(o.Group)
+	if !ok {
+		return piece{}, ErrNotFound
+	}
+	ch, ok := g.Channel(o.Name)
+	if !ok {
+		return piece{}, ErrNotFound
+	}
+	switch o.Source {
+	case TimeWaveform:
+		return readWaveform(ch, o, start, end, true)
+	case TimeTimestamp:
+		return readSharedTimestamp(fr, g, ch, o, opt, start, end)
+	default:
+		return piece{}, ErrUntimed
+	}
+}
+
+func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurrence, opt options, start, end time.Time) (piece, error) {
+	name := o.Timestamp
+	if o.IsTimestamp {
+		name = o.Name
+	}
+	ck := fr.clocks[o.Group+"\x00"+name]
+	if ck == nil {
+		return piece{}, ErrNotFound
+	}
+	ck.once.Do(func() {
+		axis := ch
+		if !o.IsTimestamp {
+			var ok bool
+			axis, ok = g.Channel(name)
+			if !ok {
+				ck.err = ErrNotFound
+				return
+			}
+		}
+		ck.times, ck.y, ck.err = loadAxis(axis, opt, ck.tsUsers > 0)
+		if ck.err != nil {
+			return
+		}
+		if ck.err = checkMonotonic(ck.times); ck.err != nil {
+			return
+		}
+		ck.i0, ck.i1 = timeWindow(ck.times, start, end, true)
+		if d, ok := uniformDt(ck.times); ok {
+			ck.dt = d
+		}
+	})
+	if ck.err != nil {
+		return piece{}, ck.err
+	}
+	var y []float64
+	if o.IsTimestamp {
+		y = ck.y
+	} else {
+		var err error
+		y, err = ch.Float64s()
+		if err != nil {
+			return piece{}, err
+		}
+	}
+	if len(y) != len(ck.times) {
+		return piece{}, ErrArgument
+	}
+	p := piece{
+		file:  o.File,
+		dt:    ck.dt,
+		timed: true,
+		y:     clipFloat(y, ck.i0, ck.i1, o.IsTimestamp && ck.tsUsers > 1),
+		times: clipTime(ck.times, ck.i0, ck.i1, ck.users > 1),
+	}
+	if len(p.times) > 0 {
+		p.start = p.times[0]
+	}
+	return p, nil
 }
 
 func readFloatSpan(ch *tdms.Channel, i0, i1 int) ([]float64, error) {
@@ -264,6 +541,28 @@ func readFloatSpan(ch *tdms.Channel, i0, i1 int) ([]float64, error) {
 }
 
 func mergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
+	kept := 0
+	var only piece
+	for _, p := range pieces {
+		if len(p.y) == 0 {
+			continue
+		}
+		kept++
+		only = p
+	}
+	// One file (or a window that hit one file) already owns its slices.
+	// Copying them into a new series buffer is a full extra pass.
+	if kept == 1 {
+		s := Series{Files: []string{only.file}, Y: only.y}
+		if only.timed && len(only.times) > 0 {
+			s.Times = only.times
+			s.Timed = true
+			if only.dt > 0 {
+				s.Dt = only.dt
+			}
+		}
+		return s, nil
+	}
 	var y []float64
 	var times []time.Time
 	var dts []float64

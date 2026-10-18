@@ -363,6 +363,10 @@ func TestNonMonotonic(t *testing.T) {
 	if len(ds.Find("ai0")) != 1 || !ds.Find("ai0")[0].Timed {
 		t.Fatal("catalog should keep the channel")
 	}
+	occ := ds.Find("ai0")[0]
+	if !occ.Start.Equal(epoch) || !occ.Last.Equal(epoch.Add(2*time.Second)) || occ.Dt != 0 {
+		t.Fatalf("span start=%s last=%s dt=%v", occ.Start, occ.Last, occ.Dt)
+	}
 	_, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(500*time.Millisecond))
 	if !errors.Is(err, ErrMonotonic) {
 		t.Fatalf("window err = %v", err)
@@ -370,6 +374,38 @@ func TestNonMonotonic(t *testing.T) {
 	_, err = ds.Read(Selector{Name: "ai0"})
 	if !errors.Is(err, ErrMonotonic) {
 		t.Fatalf("read err = %v", err)
+	}
+}
+
+func TestReadManySharedFile(t *testing.T) {
+	dir := t.TempDir()
+	writeSpecs(t, filepath.Join(dir, "run.tdms"), []spec{
+		{group: "acq", name: "Time", y: []float64{0, 1, 2, 3}},
+		{group: "acq", name: "ai0", y: []float64{1, 2, 3, 4}},
+		{group: "acq", name: "ai1", y: []float64{10, 20, 30, 40}},
+		{group: "acq", name: "ai2", y: []float64{5, 6, 7, 8}},
+	})
+	ds := openAt(t, dir)
+	out, err := ds.ReadMany([]Selector{
+		{Name: "Time", Group: "acq"},
+		{Name: "ai0", Group: "acq"},
+		{Name: "ai1", Group: "acq"},
+		{Name: "ai2", Group: "acq"},
+	}, epoch.Add(time.Second), epoch.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFloats(out[0].Y, []float64{1, 2}) || !sameFloats(out[1].Y, []float64{2, 3}) ||
+		!sameFloats(out[2].Y, []float64{20, 30}) || !sameFloats(out[3].Y, []float64{6, 7}) {
+		t.Fatalf("Y = %v %v %v %v", out[0].Y, out[1].Y, out[2].Y, out[3].Y)
+	}
+	if !out[1].Times[0].Equal(epoch.Add(time.Second)) || !out[1].Times[1].Equal(epoch.Add(2*time.Second)) {
+		t.Fatalf("times = %v", out[1].Times)
+	}
+	out[1].Times[0] = out[1].Times[0].Add(time.Hour)
+	out[1].Y[0] = -1
+	if out[2].Times[0].Equal(out[1].Times[0]) || out[2].Y[0] == -1 {
+		t.Fatal("ReadMany series alias")
 	}
 }
 

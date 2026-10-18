@@ -528,24 +528,17 @@ func (d *Dataset) ReadWindow(sel Selector, start, end time.Time, opts ...ReadOpt
 
 // ReadMany reads each selector over the same half-open window [start, end).
 // Every series uses one basis: WithReadBasis if passed, otherwise the dataset
-// basis. Selectors run with WithReadWorkers concurrency. The result order
-// matches sels. One untimed selector fails the call with ErrUntimed.
+// basis. The result order matches sels. One untimed selector fails the call
+// with ErrUntimed.
+//
+// Channels that share a file are read from one open. A timestamp channel used
+// by several of those channels is decoded once per call. Concurrency is
+// WithReadWorkers across that work, not one pool per selector.
 func (d *Dataset) ReadMany(sels []Selector, start, end time.Time, opts ...ReadOption) ([]Series, error) {
 	if !end.After(start) {
 		return nil, fmt.Errorf("%w: window end must be after start", ErrArgument)
 	}
-	basis := d.basisFor(opts)
-	out := make([]Series, len(sels))
-	errs := make([]error, len(sels))
-	run(d.opt.readWorkers, len(sels), func(i int) {
-		out[i], errs[i] = d.read(sels[i], start, end, true, basis)
-	})
-	for _, err := range errs {
-		if err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	return d.readShared(sels, start, end, d.basisFor(opts))
 }
 
 func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis time.Time) (Series, error) {
@@ -558,23 +551,18 @@ func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis ti
 			return Series{}, fmt.Errorf("%w: %q group %q has mixed time axes", ErrArgument, hits[0].Name, hits[0].Group)
 		}
 	}
-	if window {
-		for _, h := range hits {
-			if !h.Timed {
-				return Series{}, fmt.Errorf("%w: %q group %q", ErrUntimed, h.Name, h.Group)
-			}
-		}
+	if err := validateWindow(hits, window); err != nil {
+		return Series{}, err
 	}
 	type job struct {
-		o     Occurrence
-		index int
+		o Occurrence
 	}
 	var jobs []job
-	for i, o := range hits {
+	for _, o := range hits {
 		if window && o.Timed && !hitsWindow(o, start, end) {
 			continue
 		}
-		jobs = append(jobs, job{o: o, index: i})
+		jobs = append(jobs, job{o: o})
 	}
 	pieces := make([]piece, len(jobs))
 	errs := make([]error, len(jobs))
@@ -586,6 +574,22 @@ func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis ti
 			return Series{}, fmt.Errorf("dataset: read %s %q/%q: %w", jobs[i].o.File, jobs[i].o.Group, jobs[i].o.Name, err)
 		}
 	}
+	return d.finish(sel, hits, pieces, basis)
+}
+
+func validateWindow(hits []Occurrence, window bool) error {
+	if !window {
+		return nil
+	}
+	for _, h := range hits {
+		if !h.Timed {
+			return fmt.Errorf("%w: %q group %q", ErrUntimed, h.Name, h.Group)
+		}
+	}
+	return nil
+}
+
+func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis time.Time) (Series, error) {
 	sort.Slice(pieces, func(i, j int) bool {
 		if !pieces[i].start.Equal(pieces[j].start) {
 			if pieces[i].timed != pieces[j].timed {
@@ -742,12 +746,17 @@ func indexFile(path string, opt options) ([]Occurrence, error) {
 			byName[ch.Name()] = ch
 		}
 		var tsCh *tdms.Channel
-		var tsTimes []time.Time
+		var tsStart, tsLast time.Time
+		var tsDt float64
+		tsHasDt := false
 		tsUsable := false
 		if mode == clockNamed {
 			tsCh = byName[name]
 			if tsCh != nil {
-				tsTimes, tsUsable, err = loadDeclaredTimes(tsCh, opt)
+				// Span is computed once per clock. Walking it again for every
+				// data channel is the same answer and dominates catalog time
+				// when many channels share a long axis.
+				tsStart, tsLast, tsDt, tsHasDt, tsUsable, err = spanDeclared(tsCh, opt)
 				if err != nil {
 					return nil, err
 				}
@@ -767,15 +776,15 @@ func indexFile(path string, opt options) ([]Occurrence, error) {
 					if tsUsable {
 						o.Timed = true
 						o.Source = TimeTimestamp
-						applySpan(&o, tsTimes)
+						stampSpan(&o, tsCh.Len(), tsStart, tsLast, tsDt, tsHasDt)
 					}
 					break
 				}
-				if tsCh != nil && tsUsable && len(tsTimes) == ch.Len() {
+				if tsCh != nil && tsUsable && tsCh.Len() == ch.Len() {
 					o.Timed = true
 					o.Source = TimeTimestamp
 					o.Timestamp = name
-					applySpan(&o, tsTimes)
+					stampSpan(&o, ch.Len(), tsStart, tsLast, tsDt, tsHasDt)
 					break
 				}
 			case clockOptOut, clockNone:
@@ -789,39 +798,150 @@ func indexFile(path string, opt options) ([]Occurrence, error) {
 	return out, nil
 }
 
-func loadDeclaredTimes(ch *tdms.Channel, opt options) ([]time.Time, bool, error) {
+// spanDeclared reports the catalog span of a declared clock without retaining
+// a sample vector. The channel is still decoded in full: uniform dt and a
+// non-monotonic min/max both require every sample, and the core reader has no
+// range read. The decoded buffer is released when this returns.
+func spanDeclared(ch *tdms.Channel, opt options) (start, last time.Time, dt float64, hasDt, usable bool, err error) {
 	if ch.DataType() == tdms.TypeTimestamp {
 		if ch.Len() == 0 {
-			return nil, true, nil
+			return time.Time{}, time.Time{}, 0, false, true, nil
 		}
-		ts, err := ch.Times()
+		raw, err := ch.Timestamps()
 		if err != nil {
-			return nil, true, err
+			return time.Time{}, time.Time{}, 0, false, true, err
 		}
-		return ts, true, nil
+		var acc timeAcc
+		for i, t := range raw {
+			tm, ok := t.Time()
+			if !ok {
+				return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: channel %q timestamp %d (%d s) does not fit in time.Time", ErrArgument, ch.Name(), i, t.Seconds)
+			}
+			acc.add(tm)
+		}
+		return acc.start, acc.last, acc.dt, acc.hasDt, true, nil
 	}
 	if !numericTimeType(ch.DataType()) {
-		return nil, false, nil
+		return time.Time{}, time.Time{}, 0, false, false, nil
 	}
 	if ch.Len() == 0 {
-		return nil, true, nil
+		return time.Time{}, time.Time{}, 0, false, true, nil
 	}
 	if !opt.epochSet {
-		return nil, true, fmt.Errorf("%w: numeric timestamp channel %q in group %q requires WithNumericEpoch", ErrArgument, ch.Name(), ch.GroupName())
+		return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("%w: numeric timestamp channel %q in group %q requires WithNumericEpoch", ErrArgument, ch.Name(), ch.GroupName())
 	}
 	ys, err := ch.Float64s()
 	if err != nil {
-		return nil, true, err
+		return time.Time{}, time.Time{}, 0, false, true, err
 	}
-	out := make([]time.Time, len(ys))
+	var acc timeAcc
+	for _, v := range ys {
+		tm, err := secondsToTime(opt.epoch, v)
+		if err != nil {
+			return time.Time{}, time.Time{}, 0, false, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+		}
+		acc.add(tm)
+	}
+	return acc.start, acc.last, acc.dt, acc.hasDt, true, nil
+}
+
+// loadAxis decodes a declared clock once. y is the channel's float64 values
+// when wantY is set (the caller is reading the clock itself). Numeric clocks
+// keep the Float64s buffer as y; timestamp clocks convert Timestamps in one pass.
+func loadAxis(ch *tdms.Channel, opt options, wantY bool) (times []time.Time, y []float64, err error) {
+	if ch.DataType() == tdms.TypeTimestamp {
+		if ch.Len() == 0 {
+			return nil, nil, nil
+		}
+		raw, err := ch.Timestamps()
+		if err != nil {
+			return nil, nil, err
+		}
+		times = make([]time.Time, len(raw))
+		if wantY {
+			y = make([]float64, len(raw))
+		}
+		for i, t := range raw {
+			tm, ok := t.Time()
+			if !ok {
+				return nil, nil, fmt.Errorf("%w: channel %q timestamp %d (%d s) does not fit in time.Time", ErrArgument, ch.Name(), i, t.Seconds)
+			}
+			times[i] = tm
+			if wantY {
+				y[i] = float64(tm.UnixNano()) / 1e9
+			}
+		}
+		return times, y, nil
+	}
+	if !numericTimeType(ch.DataType()) {
+		return nil, nil, fmt.Errorf("%w: channel %q is not a timestamp axis", ErrUntimed, ch.Name())
+	}
+	if ch.Len() == 0 {
+		return nil, nil, nil
+	}
+	if !opt.epochSet {
+		return nil, nil, fmt.Errorf("%w: numeric timestamp channel %q in group %q requires WithNumericEpoch", ErrArgument, ch.Name(), ch.GroupName())
+	}
+	ys, err := ch.Float64s()
+	if err != nil {
+		return nil, nil, err
+	}
+	times = make([]time.Time, len(ys))
 	for i, v := range ys {
 		tm, err := secondsToTime(opt.epoch, v)
 		if err != nil {
-			return nil, true, fmt.Errorf("channel %q: %w", ch.Name(), err)
+			return nil, nil, fmt.Errorf("channel %q: %w", ch.Name(), err)
 		}
-		out[i] = tm
+		times[i] = tm
 	}
-	return out, true, nil
+	if wantY {
+		y = ys
+	}
+	return times, y, nil
+}
+
+// timeAcc matches applySpan plus uniformDt: min/max even when the axis steps
+// backwards, and Dt only when every positive step matches the first within 1ns.
+type timeAcc struct {
+	start, last, prev time.Time
+	dt                float64
+	hasDt             bool
+	n                 int
+}
+
+func (a *timeAcc) add(tm time.Time) {
+	if a.n == 0 {
+		a.start, a.last, a.prev = tm, tm, tm
+		a.n = 1
+		return
+	}
+	if tm.Before(a.start) {
+		a.start = tm
+	}
+	if tm.After(a.last) {
+		a.last = tm
+	}
+	step := tm.Sub(a.prev).Seconds()
+	if a.n == 1 {
+		if step > 0 {
+			a.dt = step
+			a.hasDt = true
+		}
+	} else if a.hasDt && math.Abs(step-a.dt) > 1e-9 {
+		a.hasDt = false
+	}
+	a.prev = tm
+	a.n++
+}
+
+func stampSpan(o *Occurrence, n int, start, last time.Time, dt float64, hasDt bool) {
+	if n <= 0 {
+		return
+	}
+	o.Start, o.Last = start, last
+	if hasDt {
+		o.Dt = dt
+	}
 }
 
 func numericTimeType(dt tdms.DataType) bool {
@@ -863,24 +983,6 @@ func applyWaveform(o *Occurrence, ch *tdms.Channel) error {
 	}
 	o.Start, o.Last = lo, hi
 	return nil
-}
-
-func applySpan(o *Occurrence, times []time.Time) {
-	if len(times) == 0 {
-		return
-	}
-	o.Start, o.Last = times[0], times[0]
-	for _, ts := range times[1:] {
-		if ts.Before(o.Start) {
-			o.Start = ts
-		}
-		if ts.After(o.Last) {
-			o.Last = ts
-		}
-	}
-	if dt, ok := uniformDt(times); ok {
-		o.Dt = dt
-	}
 }
 
 func uniformDt(times []time.Time) (float64, bool) {
