@@ -26,7 +26,7 @@ require (
 // Module path is the future gotdms-python repository, not a subdirectory
 // of the core module. In this checkout the parent directory is still the
 // core module, so the replace below is what `go test` uses.
-// After extraction, delete this replace and require a core tag that
-// contains the dataset API. No such tag exists yet. v0.1.0 of the core
-// module is the reader and writer only. See EXTRACTION.md.
+// After extraction, delete this replace and require a published core tag.
+// main already contains the dataset API. No tag has been published yet.
+// See EXTRACTION.md.
 replace github.com/trey-copeland/gotdms => ../

@@ -41,6 +41,6 @@ frame = bundle.as_polars()
 
 The long npTDMS mapping, including the LGPL-3.0 and MIT license note, is `docs/nptdms-migration.md` in the source distribution. This project's own license is MIT (`LICENSE`).
 
-Python 3.10 or newer. The client and the bridge speak protocol version 1. That protocol number, not a core git tag, is the compatibility check between them. The core module is versioned on its own. Its proposed `v0.1.0` is the reader and writer only. This binary needs the dataset API, which is not in that tag yet. See `EXTRACTION.md`.
+Python 3.10 or newer. The client and the bridge speak protocol version 1. That protocol number, not a core git tag, is the compatibility check between them. The core module is versioned on its own. `main` includes the dataset API this binary imports. No core tag has been published yet. See `EXTRACTION.md`.
 
 The repository URLs in the package metadata point at `github.com/trey-copeland/gotdms-python`, which is the intended name and does not exist until that repository is created.

@@ -219,7 +219,7 @@ Requests: `open`, `catalog`, `find`, `search`, `match`, `read`, `read_many`, `cl
 - No HDF5 export.
 - No `tdmsinfo` CLI.
 - Memory mapping is intentionally absent.
-- The core reader still has no sample seek. A window near the end of a waveform-timed channel decodes from the first sample. Declared timestamp channels are decoded in full on read because the times are the samples, and catalog decodes them once to compute the span. This bridge does not add a range read.
+- `Channel.Slice` and `CursorAt` read a sample range without walking earlier samples. Dataset waveform windows do not call them. The cursor starts at sample 0, batches before the window are discarded, and the walk stops at the window, so a tail window still decodes the prefix. A declared timestamp axis is decoded in full on read because the times are the samples. Catalog of a uniform clock reads the first two samples and derives the span; a first step that is not positive is scanned in full. This bridge calls dataset and does not add its own range read.
 - Eager `read_all` is an explicit call. `open` alone does not pull every sample into Python.
 - File-status for an incomplete final segment is the core reader's behavior; the bridge does not add an npTDMS `file_status` object.
 - Integers wider than the float64 mantissa are returned as `float64`, which is what the dataset layer already does.
