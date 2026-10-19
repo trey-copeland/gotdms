@@ -58,12 +58,37 @@ const (
 	spanFlagStr  = 1 << 1
 	spanFlagLive = 1 << 2
 
-	// spanRecord is the on-disk size of one span. See the package comment.
+	// spanRecord is the on-disk size of one span. See SegmentIndexPath.
 	spanRecord = 96
 )
 
 // SegmentIndexPath is the conventional sidecar for a TDMS file: path plus
-// ".gtdx". Pass it to WithSegmentIndex. The file is not an NI *.tdms_index.
+// ".gtdx". Pass it to WithSegmentIndex. The file is not an NI *.tdms_index
+// (TDSh) companion.
+//
+// The sidecar is little-endian, version 1, magic "GTDX", with a 72-byte header:
+//
+//	0   magic
+//	4   uint32 version
+//	8   int64  data file size
+//	16  int64  modification time, Unix nanoseconds
+//	24  uint64 device (0 if the platform has none)
+//	32  uint64 inode (0 if the platform has none)
+//	40  uint32 IEEE CRC-32 of each lead-in followed by that segment's metadata
+//	44  uint32 IEEE CRC-32 of the payload
+//	48  uint32 TDMS version (4712 or 4713)
+//	52  uint32 segment count
+//	56  uint32 flags (bit 0 incomplete final segment, bit 1 partial tail)
+//	60  uint32 reserved, must be 0
+//	64  int64  unused tail bytes
+//	72  payload: file properties, groups, channels, and spans
+//
+// A property is a uint32 length and the ordinary TDMS property encoding.
+// A span is 96 bytes: data position, chunk size, chunk count, values per
+// chunk, column, stride, type size, a flag word (big-endian, string, live),
+// string block size, and the partial-chunk position fields. Invalidation is
+// size, modification time, device, inode, the metadata fingerprint, and the
+// payload checksum. Raw sample bytes are not in the sidecar.
 func SegmentIndexPath(path string) string {
 	return path + ".gtdx"
 }
