@@ -29,7 +29,8 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ### Changed
 
-- README benchmark table remeasured with `-count=10 -benchtime=100ms`. Medians are by hand (benchstat is not vendored). `Write` of 128 MiB to a file is 1403 MB/s and 129.00 MiB/op after the copy (2989 MB/s and 1.00 MiB/op when the first slice was aliased). `BenchmarkReadWindowTail` is 25.4 µs and 8025 B/op (was 32.0 ms and 40.01 MiB/op). `BenchmarkReadWindowTailWaveform` is 13.1 µs and 7065 B/op (was 536 µs and 69.4 KiB/op).
+- README benchmark table remeasured with `-count=10 -benchtime=100ms`. Medians are by hand (benchstat is not vendored). `Write` of 128 MiB to a file is 1403 MB/s and 129.00 MiB/op after the copy (2989 MB/s and 1.00 MiB/op when the first slice was aliased).
+- Dataset tail-window README figures are medians of 10 runs (`-count=10`, default benchtime) on a 4 vCPU cloud VM, a synthetic 1,048,576-sample file, and a 64-sample window. `BenchmarkReadWindowTail` is 27.32 µs, 8,398 B/op, and 66 allocs/op (was 28.46 ms, 41,948,728 B/op, and 60 allocs/op). `BenchmarkReadWindowTailWaveform` is 14.80 µs, 6,909 B/op, and 63 allocs/op (was 599.6 µs, 71,040 B/op, and 60 allocs/op).
 - Extended-float comments state that the 10-byte layout is spec-derived and has no NI fixture. The bytes are unchanged.
 
 - `cmd/gotdms` prints file structure (`info`, optionally `--json`) and writes channel samples as CSV (`convert`). The CSV has a header row. Timestamps are UTC RFC3339Nano because the channel type is a timestamp, not because of the channel name. A missing sample is `#N/A`. An empty string is an empty field.
