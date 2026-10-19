@@ -251,7 +251,17 @@ func (d *decoder) str() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return ignoreTrailingNUL(b), nil
+}
+
+// ignoreTrailingNUL applies the TDMS rule for length-prefixed strings: a NUL
+// counted in the length is not a terminator and is not part of the value.
+// One trailing NUL is dropped. A NUL that is not the last byte is data.
+func ignoreTrailingNUL(b []byte) string {
+	if len(b) > 0 && b[len(b)-1] == 0 {
+		b = b[:len(b)-1]
+	}
+	return string(b)
 }
 
 func (d *decoder) value(dt DataType) (any, error) {
@@ -610,7 +620,7 @@ func decodeStrings(block []byte, n int, bo binary.ByteOrder) ([]string, error) {
 		if end < prev || int(end) > len(payload) {
 			return nil, ErrCorrupt
 		}
-		out[i] = string(payload[prev:end])
+		out[i] = ignoreTrailingNUL(payload[prev:end])
 		prev = end
 	}
 	if int(prev) != len(payload) {

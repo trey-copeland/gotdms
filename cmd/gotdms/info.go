@@ -48,7 +48,7 @@ func writeInfo(w io.Writer, f *tdms.File, path string) error {
 	if _, err := fmt.Fprintf(w, "file: %s\nversion: %d\nsegments: %d\nstatus: %s\n", path, f.Version(), f.SegmentCount(), st); err != nil {
 		return err
 	}
-	if st.Incomplete {
+	if st.Incomplete || st.Truncated {
 		if _, err := fmt.Fprintf(w, "partial tail: %t\nunused tail bytes: %d\n", st.PartialTail, st.UnusedTail); err != nil {
 			return err
 		}
@@ -123,6 +123,7 @@ type infoFile struct {
 type infoStatus struct {
 	Complete        bool  `json:"complete"`
 	Incomplete      bool  `json:"incomplete"`
+	Truncated       bool  `json:"truncated"`
 	PartialTail     bool  `json:"partial_tail"`
 	UnusedTailBytes int64 `json:"unused_tail_bytes"`
 }
@@ -151,10 +152,16 @@ type infoChannel struct {
 func writeInfoJSON(w io.Writer, f *tdms.File, path string) error {
 	st := f.Status()
 	doc := infoFile{
-		Path:       path,
-		Version:    f.Version(),
-		Segments:   f.SegmentCount(),
-		Status:     infoStatus{Complete: st.Complete, Incomplete: st.Incomplete, PartialTail: st.PartialTail, UnusedTailBytes: st.UnusedTail},
+		Path:     path,
+		Version:  f.Version(),
+		Segments: f.SegmentCount(),
+		Status: infoStatus{
+			Complete:        st.Complete,
+			Incomplete:      st.Incomplete,
+			Truncated:       st.Truncated,
+			PartialTail:     st.PartialTail,
+			UnusedTailBytes: st.UnusedTail,
+		},
 		Properties: propsJSON(f.Properties()),
 		Groups:     []infoGroup{},
 	}

@@ -5,11 +5,14 @@ import "math"
 // extendedSize is the on-disk size of tdsTypeExtendedFloat.
 //
 // The NI article does not state the width. This package uses 10 bytes, the
-// x86 80-bit extended format LabVIEW uses on Windows: a 64-bit significand
-// with an explicit integer bit, then a 15-bit biased exponent and a sign bit.
-// That is the layout every maintained TDMS reader documents, and it is the
-// layout written here. Platforms that pad extended floats to 16 bytes are not
-// auto-detected.
+// x86 80-bit extended format described by the readers that document a layout:
+// a 64-bit significand with an explicit integer bit, then a 15-bit biased
+// exponent and a sign bit. The layout is derived from that description of
+// the spec. It has not been checked against a file written by LabVIEW or
+// another NI tool, and npTDMS does not produce this type, so there is no
+// external fixture in this repository. Platforms that pad extended floats
+// to 16 bytes are not auto-detected. Do not change the 10-byte width without
+// an NI fixture.
 const extendedSize = 10
 
 const extendedBias = 16383

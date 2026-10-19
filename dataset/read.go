@@ -164,6 +164,15 @@ func readTimestampAxis(g *tdms.Group, ch *tdms.Channel, o Occurrence, opt option
 			return piece{}, ErrNotFound
 		}
 	}
+	if window {
+		times, axisY, abs0, abs1, ok, err := tryClockWindow(axis, o, opt, start, end, o.IsTimestamp)
+		if err != nil {
+			return piece{}, err
+		}
+		if ok {
+			return pieceFromWindow(ch, o, times, axisY, abs0, abs1)
+		}
+	}
 	// wantY only when this call's series is the clock. A data channel must not
 	// decode the axis a second time to build Y.
 	times, axisY, err := loadAxis(axis, opt, o.IsTimestamp)
@@ -296,14 +305,16 @@ type fileRead struct {
 }
 
 type clockRead struct {
-	once    sync.Once
-	times   []time.Time
-	y       []float64
-	dt      float64
-	i0, i1  int
-	err     error
-	users   int
-	tsUsers int
+	once       sync.Once
+	times      []time.Time
+	y          []float64
+	dt         float64
+	i0, i1     int
+	abs0, abs1 int64
+	windowed   bool
+	err        error
+	users      int
+	tsUsers    int
 }
 
 func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.Time) ([]Series, error) {
@@ -458,6 +469,21 @@ func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurr
 				return
 			}
 		}
+		times, y, abs0, abs1, ok, err := tryClockWindow(axis, o, opt, start, end, ck.tsUsers > 0)
+		if err != nil {
+			ck.err = err
+			return
+		}
+		if ok {
+			ck.times, ck.y = times, y
+			ck.abs0, ck.abs1 = abs0, abs1
+			ck.windowed = true
+			ck.i0, ck.i1 = 0, len(times)
+			if d, ok := uniformDt(times); ok {
+				ck.dt = d
+			}
+			return
+		}
 		ck.times, ck.y, ck.err = loadAxis(axis, opt, ck.tsUsers > 0)
 		if ck.err != nil {
 			return
@@ -476,6 +502,12 @@ func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurr
 	var y []float64
 	if o.IsTimestamp {
 		y = ck.y
+	} else if ck.windowed {
+		var err error
+		y, err = readFloatSpan(ch, ck.abs0, ck.abs1)
+		if err != nil {
+			return piece{}, err
+		}
 	} else {
 		var err error
 		y, err = ch.Float64s()
@@ -503,7 +535,7 @@ func readFloatSpan(ch *tdms.Channel, i0, i1 int64) ([]float64, error) {
 	if i1 <= i0 {
 		return []float64{}, nil
 	}
-	// Cursor's index is an int, matching Channel.Len. A span that does not
+	// CursorAt's index is an int, matching Channel.Len. A span that does not
 	// fit is rejected instead of narrowing.
 	s0, err := indexToInt(i0)
 	if err != nil {
@@ -513,45 +545,149 @@ func readFloatSpan(ch *tdms.Channel, i0, i1 int64) ([]float64, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Cursor has no seek and reuses the batch slice on the next Next.
-	// Values are copied into out before the next batch. Leading batches are
-	// decoded and discarded. The walk stops at i1, so the tail is not read.
-	// main does not export per-segment sample bounds, so whole leading
-	// segments cannot be skipped from this package.
-	out := make([]float64, 0, s1-s0)
-	cur := ch.Cursor(8192)
-	idx := 0
-	for cur.Next() {
-		if idx >= s1 {
-			break
-		}
-		batch, err := cur.Float64s()
-		if err != nil {
+	// CursorAt seeks to sample s0. The prefix is not decoded.
+	n := s1 - s0
+	cur := ch.CursorAt(s0, n, n)
+	defer cur.Close()
+	if !cur.Next() {
+		if err := cur.Err(); err != nil {
 			return nil, err
 		}
-		if idx+len(batch) <= s0 {
-			idx += len(batch)
-			continue
-		}
-		for i, v := range batch {
-			abs := idx + i
-			if abs < s0 {
-				continue
-			}
-			if abs >= s1 {
-				return out, nil
-			}
-			out = append(out, v)
-		}
-		idx += len(batch)
-		if idx >= s1 {
-			break
-		}
+		return []float64{}, nil
 	}
-	if err := cur.Err(); err != nil {
+	out, err := cur.Float64sCopy()
+	if err != nil {
 		return nil, err
 	}
+	if len(out) != n {
+		return nil, fmt.Errorf("%w: read %d samples, want %d", ErrArgument, len(out), n)
+	}
 	return out, nil
+}
+
+// tryClockWindow reads [start, end) by sample index when the catalog span is
+// a positive uniform step. ok is false when the sliced timestamps do not
+// match that step, so the caller decodes the whole axis instead. A window
+// that misses the span returns ok with empty slices and does not read.
+func tryClockWindow(axis *tdms.Channel, o Occurrence, opt options, start, end time.Time, wantY bool) (times []time.Time, y []float64, abs0, abs1 int64, ok bool, err error) {
+	if !o.Timed || o.Dt <= 0 || o.Samples <= 0 {
+		return nil, nil, 0, 0, false, nil
+	}
+	n := int64(o.Samples)
+	abs0 = firstAtOrAfter(o.Start, o.Dt, n, start)
+	abs1 = firstAtOrAfter(o.Start, o.Dt, n, end)
+	if abs1 < abs0 {
+		abs0, abs1 = abs1, abs0
+	}
+	if abs1 <= abs0 {
+		return []time.Time{}, nil, abs0, abs1, true, nil
+	}
+	times, y, err = loadAxisSpan(axis, opt, abs0, abs1, wantY)
+	if err != nil {
+		return nil, nil, 0, 0, false, err
+	}
+	if !timesMatchStep(o.Start, o.Dt, abs0, times) {
+		return nil, nil, 0, 0, false, nil
+	}
+	return times, y, abs0, abs1, true, nil
+}
+
+func pieceFromWindow(ch *tdms.Channel, o Occurrence, times []time.Time, axisY []float64, abs0, abs1 int64) (piece, error) {
+	var y []float64
+	var err error
+	if o.IsTimestamp {
+		y = axisY
+	} else if abs1 > abs0 {
+		y, err = readFloatSpan(ch, abs0, abs1)
+		if err != nil {
+			return piece{}, err
+		}
+	}
+	if len(y) != len(times) {
+		return piece{}, ErrArgument
+	}
+	dt := 0.0
+	if d, ok := uniformDt(times); ok {
+		dt = d
+	}
+	p := piece{file: o.File, dt: dt, timed: true, y: y, times: times}
+	if len(times) > 0 {
+		p.start = times[0]
+	}
+	return p, nil
+}
+
+func loadAxisSpan(ch *tdms.Channel, opt options, i0, i1 int64, wantY bool) ([]time.Time, []float64, error) {
+	s0, err := indexToInt(i0)
+	if err != nil {
+		return nil, nil, err
+	}
+	s1, err := indexToInt(i1)
+	if err != nil {
+		return nil, nil, err
+	}
+	n := s1 - s0
+	if ch.DataType() == tdms.TypeTimestamp {
+		v, err := ch.Slice(s0, n)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw, ok := v.([]tdms.Timestamp)
+		if !ok {
+			return nil, nil, fmt.Errorf("%w: timestamp channel returned %T", ErrArgument, v)
+		}
+		times := make([]time.Time, len(raw))
+		var y []float64
+		if wantY {
+			y = make([]float64, len(raw))
+		}
+		for i, t := range raw {
+			tm, ok := t.Time()
+			if !ok {
+				return nil, nil, fmt.Errorf("%w: channel %q timestamp %d (%d s) does not fit in time.Time", ErrArgument, ch.Name(), i0+int64(i), t.Seconds)
+			}
+			times[i] = tm
+			if wantY {
+				y[i] = float64(tm.UnixNano()) / 1e9
+			}
+		}
+		return times, y, nil
+	}
+	if !numericTimeType(ch.DataType()) {
+		return nil, nil, fmt.Errorf("%w: channel %q is not a timestamp axis", ErrUntimed, ch.Name())
+	}
+	if !opt.epochSet {
+		return nil, nil, fmt.Errorf("%w: numeric timestamp channel %q in group %q requires WithNumericEpoch", ErrArgument, ch.Name(), ch.GroupName())
+	}
+	ys, err := readFloatSpan(ch, i0, i1)
+	if err != nil {
+		return nil, nil, err
+	}
+	times := make([]time.Time, len(ys))
+	for i, v := range ys {
+		tm, err := secondsToTime(opt.epoch, v)
+		if err != nil {
+			return nil, nil, fmt.Errorf("channel %q: %w", ch.Name(), err)
+		}
+		times[i] = tm
+	}
+	if wantY {
+		return times, ys, nil
+	}
+	return times, nil, nil
+}
+
+func timesMatchStep(t0 time.Time, dt float64, i0 int64, times []time.Time) bool {
+	for i, tm := range times {
+		exp, err := waveformAt(t0, dt, i0+int64(i))
+		if err != nil {
+			return false
+		}
+		if tm.Before(exp.Add(-timeSlack)) || exp.Add(timeSlack).Before(tm) {
+			return false
+		}
+	}
+	return true
 }
 
 func indexToInt(v int64) (int, error) {

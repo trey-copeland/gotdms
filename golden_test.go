@@ -107,6 +107,102 @@ func TestGoldenNITwoChunksOneSegment(t *testing.T) {
 	}
 }
 
+// The five writing iterations in NI's "TDMS File Format Internal Structure"
+// (Optimization / Incremental Meta Information), concatenated. The first
+// segment is the article's updated lead-in (next offset 0xA7, two chunks).
+// Hex is copied from that article. The file is not produced by Writer, and
+// this repository has no LabVIEW to regenerate it.
+func TestGoldenNIFiveSegments(t *testing.T) {
+	buf := unhex(t, `
+		54 44 53 6D 0E 00 00 00 69 12 00 00 A7 00 00 00 00 00 00 00 77 00 00 00 00 00 00 00
+		02 00 00 00
+		13 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 63 68 61 6E 6E 65 6C 31 27
+		14 00 00 00 03 00 00 00 01 00 00 00 03 00 00 00 00 00 00 00
+		01 00 00 00
+		04 00 00 00 70 72 6F 70 20 00 00 00 05 00 00 00 76 61 6C 69 64
+		13 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 63 68 61 6E 6E 65 6C 32 27
+		14 00 00 00 03 00 00 00 01 00 00 00 03 00 00 00 00 00 00 00
+		00 00 00 00
+		01 00 00 00 02 00 00 00 03 00 00 00
+		04 00 00 00 05 00 00 00 06 00 00 00
+		01 00 00 00 02 00 00 00 03 00 00 00
+		04 00 00 00 05 00 00 00 06 00 00 00
+
+		54 44 53 6D 0A 00 00 00 69 12 00 00 50 00 00 00 00 00 00 00 38 00 00 00 00 00 00 00
+		01 00 00 00
+		13 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 63 68 61 6E 6E 65 6C 31 27
+		00 00 00 00
+		01 00 00 00
+		04 00 00 00 70 72 6F 70 20 00 00 00 05 00 00 00 65 72 72 6F 72
+		01 00 00 00 02 00 00 00 03 00 00 00
+		04 00 00 00 05 00 00 00 06 00 00 00
+
+		54 44 53 6D 0A 00 00 00 69 12 00 00 5E 00 00 00 00 00 00 00 32 00 00 00 00 00 00 00
+		01 00 00 00
+		12 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 76 6F 6C 74 61 67 65 27
+		14 00 00 00 03 00 00 00 01 00 00 00 05 00 00 00 00 00 00 00
+		00 00 00 00
+		01 00 00 00 02 00 00 00 03 00 00 00
+		04 00 00 00 05 00 00 00 06 00 00 00
+		07 00 00 00 08 00 00 00 09 00 00 00 0A 00 00 00 0B 00 00 00
+
+		54 44 53 6D 0A 00 00 00 69 12 00 00 BF 00 00 00 00 00 00 00 33 00 00 00 00 00 00 00
+		01 00 00 00
+		13 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 63 68 61 6E 6E 65 6C 32 27
+		14 00 00 00 03 00 00 00 01 00 00 00 1B 00 00 00 00 00 00 00
+		00 00 00 00
+		01 00 00 00 02 00 00 00 03 00 00 00
+		01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 05 00 00 00 06 00 00 00
+		07 00 00 00 08 00 00 00 09 00 00 00 0A 00 00 00 0B 00 00 00 0C 00 00 00
+		0D 00 00 00 0E 00 00 00 0F 00 00 00 10 00 00 00 11 00 00 00 12 00 00 00
+		13 00 00 00 14 00 00 00 15 00 00 00 16 00 00 00 17 00 00 00 18 00 00 00
+		19 00 00 00 1A 00 00 00 1B 00 00 00
+		07 00 00 00 08 00 00 00 09 00 00 00 0A 00 00 00 0B 00 00 00
+
+		54 44 53 6D 0E 00 00 00 69 12 00 00 61 00 00 00 00 00 00 00 41 00 00 00 00 00 00 00
+		02 00 00 00
+		13 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 63 68 61 6E 6E 65 6C 31 27
+		00 00 00 00 00 00 00 00
+		12 00 00 00 2F 27 67 72 6F 75 70 27 2F 27 76 6F 6C 74 61 67 65 27
+		00 00 00 00 00 00 00 00
+		01 00 00 00 02 00 00 00 03 00 00 00
+		07 00 00 00 08 00 00 00 09 00 00 00 0A 00 00 00 0B 00 00 00
+	`)
+	f := openBytes(t, buf)
+	if f.SegmentCount() != 5 {
+		t.Fatalf("segments %d", f.SegmentCount())
+	}
+	g, ok := f.Group("group")
+	if !ok {
+		t.Fatal("group")
+	}
+	c1, _ := g.Channel("channel1")
+	c2, _ := g.Channel("channel2")
+	cv, _ := g.Channel("voltage")
+	var want1 []int32
+	for i := 0; i < 6; i++ {
+		want1 = append(want1, 1, 2, 3)
+	}
+	assertEqual(t, mustValues(t, c1), want1)
+	var want2 []int32
+	for i := 0; i < 4; i++ {
+		want2 = append(want2, 4, 5, 6)
+	}
+	for i := int32(1); i <= 27; i++ {
+		want2 = append(want2, i)
+	}
+	assertEqual(t, mustValues(t, c2), want2)
+	var wantV []int32
+	for i := 0; i < 3; i++ {
+		wantV = append(wantV, 7, 8, 9, 10, 11)
+	}
+	assertEqual(t, mustValues(t, cv), wantV)
+	p, ok := c1.Property("prop")
+	if !ok || p.Value != "error" {
+		t.Fatalf("prop = %+v ok=%v", p, ok)
+	}
+}
+
 func TestGoldenStringAndTimestamp(t *testing.T) {
 	// Built with encoding/binary only: one string channel "ab","c","" and one
 	// timestamp channel at the TDMS epoch and one second later.

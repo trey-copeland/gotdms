@@ -1,7 +1,9 @@
 package tdms
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,6 +83,91 @@ func TestStatusCompleteAndTruncated(t *testing.T) {
 	}
 	if st.String() != "incomplete" {
 		t.Fatal(st.String())
+	}
+}
+
+func TestLenientTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cut.tdms")
+	w, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := w.Group("g").Channel("c", TypeFloat64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Write([]float64{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Write([]float64{3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offs := leadInOffsets(t, raw)
+	if len(offs) != 2 {
+		t.Fatalf("lead-ins %v", offs)
+	}
+	// Keep the stored next-segment offset. Cutting the tail makes that
+	// finite length run past EOF. This is not the incomplete sentinel.
+	cut := append([]byte(nil), raw[:len(raw)-3]...)
+	if err := os.WriteFile(path, cut, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("strict open: %v", err)
+	}
+	f, err := Open(path, WithLenientTail())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := f.Status()
+	if st.Complete || st.Incomplete || !st.Truncated || !st.PartialTail || st.UnusedTail != 5 {
+		t.Fatalf("%#v", st)
+	}
+	if st.String() != "truncated" {
+		t.Fatal(st.String())
+	}
+	g, _ := f.Group("g")
+	c, _ := g.Channel("c")
+	assertEqual(t, mustValues(t, c), []float64{1, 2, 3})
+	if c.committed() != 2 {
+		t.Fatalf("committed %d", c.committed())
+	}
+	f.Close()
+
+	// A fragment shorter than a lead-in is still truncated, option or not.
+	short := append([]byte(nil), raw...)
+	short = append(short, []byte("TDSm")...)
+	if err := os.WriteFile(path, short, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, WithLenientTail()); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("short lead-in: %v", err)
+	}
+
+	// Metadata that itself runs past EOF is still truncated.
+	var meta le
+	meta.u32(1)
+	meta.str("/'g'/'c'")
+	meta.full(TypeInt32, 1)
+	meta.u32(0)
+	seg := finishSegment(t, TocMetaData|TocNewObjList|TocRawData, meta.b, []byte{1, 0, 0, 0})
+	// Claim a metadata length past the bytes we keep.
+	binary.LittleEndian.PutUint64(seg[20:28], uint64(len(meta.b)+8))
+	binary.LittleEndian.PutUint64(seg[12:20], uint64(len(meta.b)+8+4))
+	kept := seg[:28+4]
+	if _, err := NewReader(bytes.NewReader(kept), WithLenientTail()); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("metadata past EOF: %v", err)
 	}
 }
 

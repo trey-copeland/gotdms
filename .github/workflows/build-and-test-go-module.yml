@@ -44,16 +44,31 @@ jobs:
       - name: race (root package)
         if: matrix.race
         run: go test -race .
-      # dataset/ is added by the dataset-layer PR. go test ./... covers it
-      # once it exists; this step adds the race run only then.
-      - name: race (dataset, when present)
+      - name: race (dataset)
         if: matrix.race
-        run: |
-          if [ -d dataset ]; then
-            go test -race ./dataset/
-          else
-            echo "dataset/ is not in this tree; skipping"
-          fi
+        run: go test -race ./dataset/
+
+  # npTDMS (https://github.com/adamreeve/npTDMS) is LGPL-2.1. It is a CI-only
+  # oracle: this job installs it with pip and never imports it from Go. It is
+  # not linked into the module, not vendored, and not shipped. The core go.mod
+  # stays free of third-party dependencies. There is no LabVIEW in this
+  # environment, so npTDMS is the external behavior anchor.
+  nptdms:
+    name: differential test against npTDMS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install npTDMS
+        run: pip install npTDMS
+      - name: compare gotdms and npTDMS
+        run: python testdata/nptdms/harness.py
 
   windows:
     name: test (windows, go 1.22)

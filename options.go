@@ -12,6 +12,7 @@ const (
 type readerConfig struct {
 	bufSize      int
 	indexSidecar string
+	lenientTail  bool
 }
 
 // ReaderOption configures NewReader.
@@ -27,10 +28,26 @@ func WithReadBuffer(size int) ReaderOption {
 	}
 }
 
+// WithLenientTail opens a file whose final segment declares a next-segment
+// offset past EOF. Earlier segments are kept, and whole values that fit in
+// the partial tail are readable. File.Status reports Truncated, and those
+// tail samples are not committed, so Follow does not deliver them until the
+// declared length is actually present. Without this option Open returns
+// ErrTruncated and the earlier segments are not available. A trailing
+// fragment shorter than a lead-in, or a final segment whose metadata itself
+// runs past EOF, is still ErrTruncated.
+func WithLenientTail() ReaderOption {
+	return func(c *readerConfig) {
+		c.lenientTail = true
+	}
+}
+
 // WithSegmentIndex reads and writes a sidecar segment index at sidecar.
 // An empty sidecar disables the option. The cache records the parsed segment
-// layout so a later open can skip decoding lead-ins, object paths, raw-data
-// indexes, and properties. Raw samples are not stored.
+// layout (object paths, raw-data indexes, properties, and the spans Values
+// uses). Raw samples are not stored. A cache hit still reads every lead-in
+// and metadata section to recompute the fingerprint; it does not rebuild the
+// object tree from those bytes.
 //
 // The sidecar is used only when it validates against the data file. Validation
 // requires the file size, the modification time in nanoseconds, the device and

@@ -33,14 +33,16 @@
 // uses Cursor and does not retain earlier chunks. String, boolean, timestamp,
 // and complex channels return ErrType.
 //
-// File.Status reports whether the file ended on a finished segment or on the
-// NI incomplete-segment sentinel. Reads of a file that opens are unchanged:
-// whole values in an incomplete tail are still returned. Follow polls a file
-// that is still being written and yields samples only from segments whose
-// next-segment offset is a real length. WithSegmentIndex reuses a sidecar of
-// the segment layout when the file's size, modification time, identity, and
-// a fingerprint of the lead-ins and metadata still match. A missing, stale,
-// or corrupt sidecar is ignored.
+// File.Status reports whether the file ended on a finished segment, on the
+// NI incomplete-segment sentinel, or (with WithLenientTail) on a final
+// segment whose next-segment offset runs past EOF. Reads of a file that
+// opens still return whole values in that tail. Follow polls a file that is
+// still being written and yields samples only from finished segments.
+// WithSegmentIndex reuses a sidecar of the segment layout when the file's
+// size, modification time, identity, and a fingerprint of the lead-ins and
+// metadata still match. A cache hit still reads those lead-in and metadata
+// bytes to recompute the fingerprint. A missing, stale, or corrupt sidecar
+// is ignored.
 //
 // # Writing
 //
@@ -52,10 +54,10 @@
 // 0xFFFFFFFFFFFFFFFF) and patches the real offset after the raw data is on
 // disk, so a crash mid-segment still matches the rule in the NI article. A
 // non-seekable writer writes the lead-in with the finished length, then streams
-// the raw bytes. On a little-endian host, Write retains a fixed-size numeric
-// or complex slice until Flush or Close; do not mutate it before then. Other
-// value kinds are copied at Write. Flush streams that buffer and does not
-// allocate a second full copy.
+// the raw bytes. Write copies values into the channel buffer, so the caller
+// may reuse the slice. WriteNoCopy skips that copy for a fixed-size numeric
+// or complex slice; the caller must not mutate it until Flush or Close.
+// Flush streams the channel buffer and does not allocate a second full copy.
 //
 // Stream declares each channel's value count, writes the segment header, and
 // copies later chunks straight to the underlying writer. Memory stays within

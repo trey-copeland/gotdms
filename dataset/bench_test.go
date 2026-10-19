@@ -192,8 +192,8 @@ func BenchmarkReadManySharedClock(b *testing.B) {
 }
 
 // BenchmarkReadWindowTail reads 64 samples at the end of a 1<<20 timestamp
-// axis. The dataset window decodes the axis from sample 0 and then clips.
-// The result is that cost. It is not a claim that the tail is cheap.
+// axis. The catalog step is positive, so the window is read with Slice and
+// CursorAt. Samples before the window are not decoded.
 func BenchmarkReadWindowTail(b *testing.B) {
 	const n = 1 << 20
 	path := sharedClockFile(b, n, 1)
@@ -217,9 +217,8 @@ func BenchmarkReadWindowTail(b *testing.B) {
 }
 
 // BenchmarkReadWindowTailWaveform is the same tail window on a wf_* axis.
-// The index of the window is known from t0 and dt. Slice can read that
-// range; this path still starts Cursor at sample 0. The benchmark measures
-// that prefix decode.
+// The index comes from t0 and dt. The window is read with CursorAt, so the
+// prefix is not decoded.
 func BenchmarkReadWindowTailWaveform(b *testing.B) {
 	const n = 1 << 20
 	dir := b.TempDir()

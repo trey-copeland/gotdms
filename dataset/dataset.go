@@ -849,10 +849,13 @@ var spanDeclaredCalls atomic.Uint64
 // A positive first step reads the first two samples with Slice and does not
 // decode the rest. Last is derived from those samples and the length: it
 // equals the last sample when the stored axis is a uniform arithmetic
-// sequence. Monotonicity is not proved here. Read, ReadWindow, and ReadMany
-// decode the axis and return ErrMonotonic on a backwards step. Dt is that
-// first step, which is what uniformDt returns for a uniform axis; a later
-// irregular step is caught when the axis is decoded, and Series.Dt is then 0.
+// sequence. Monotonicity is not proved here. Read decodes the axis and
+// returns ErrMonotonic on a backwards step. A window whose catalog step is
+// positive reads that sample range with Slice and checks the sliced
+// timestamps against the step. A mismatch falls back to a full decode, which
+// is what reports a backwards step the arithmetic index would mis-locate.
+// Dt is that first step, which is what uniformDt returns for a uniform axis;
+// a later irregular step inside the samples actually decoded makes Series.Dt 0.
 //
 // A first step that is not positive cannot be extrapolated. Those clocks are
 // scanned in full so Start/Last stay the true min/max.

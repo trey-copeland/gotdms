@@ -34,6 +34,8 @@ type File struct {
 	incomplete  bool
 	partialTail bool
 	unusedTail  int64
+	truncated   bool // final next-segment offset ran past EOF; WithLenientTail
+	lenient     bool
 	indexUsed   bool
 }
 
@@ -99,10 +101,11 @@ type span struct {
 	partialCol    int64
 	partialStride int64
 
-	// live is set on every span that came from a final segment whose
-	// next-segment offset is the NI incomplete sentinel. Values, Slice, and
-	// Cursor still return those samples. Follow skips them until a later
-	// open sees a patched lead-in.
+	// live is set on every span from a final segment that is not finished:
+	// the NI incomplete sentinel, or a finite next-segment offset past EOF
+	// recovered by WithLenientTail. Values, Slice, and Cursor still return
+	// those samples. Follow skips them until a later open sees a finished
+	// lead-in.
 	live bool
 }
 
@@ -161,6 +164,7 @@ func newReader(r io.ReaderAt, path string, opts ...ReaderOption) (*File, error) 
 		path:    path,
 		size:    sz,
 		readBuf: cfg.bufSize,
+		lenient: cfg.lenientTail,
 		gindex:  map[string]int{},
 		byPath:  map[string]*Channel{},
 	}
@@ -592,7 +596,7 @@ func (f *File) parse() error {
 		if lead.toc&TocDAQmxRawData != 0 {
 			return wrapf("read", f.path, ErrDAQmx, "segment at %d sets kTocDAQmxRawData", pos)
 		}
-		segEnd, dataPos, err := segmentBounds(pos, f.size, lead)
+		segEnd, dataPos, truncated, err := segmentBounds(pos, f.size, lead, f.lenient)
 		if err != nil {
 			return wrapf("read", f.path, err, "segment at %d", pos)
 		}
@@ -629,7 +633,8 @@ func (f *File) parse() error {
 				return wrapf("read", f.path, err, "segment at %d", pos)
 			}
 			interleaved := lead.toc&TocInterleavedData != 0
-			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, lead.next == incompleteSegment); err != nil {
+			live := lead.next == incompleteSegment || truncated
+			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, live); err != nil {
 				return wrapf("read", f.path, err, "segment at %d", pos)
 			}
 		}
@@ -638,44 +643,57 @@ func (f *File) parse() error {
 			f.incomplete = true
 			break
 		}
+		if truncated {
+			f.truncated = true
+			break
+		}
 		pos = segEnd
 	}
 	return nil
 }
 
-func segmentBounds(pos, size int64, lead leadIn) (segEnd, dataPos int64, err error) {
+func segmentBounds(pos, size int64, lead leadIn, lenient bool) (segEnd, dataPos int64, truncated bool, err error) {
 	if lead.raw > math.MaxInt64 {
-		return 0, 0, ErrCorrupt
+		return 0, 0, false, ErrCorrupt
 	}
 	dataPos, err = add64(pos, leadInSize)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	dataPos, err = add64(dataPos, int64(lead.raw))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	if lead.next == incompleteSegment {
 		if dataPos > size {
-			return 0, 0, ErrTruncated
+			return 0, 0, false, ErrTruncated
 		}
-		return size, dataPos, nil
+		return size, dataPos, false, nil
 	}
 	if lead.next > math.MaxInt64 {
-		return 0, 0, ErrCorrupt
+		return 0, 0, false, ErrCorrupt
 	}
 	segEnd, err = add64(pos, leadInSize)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	segEnd, err = add64(segEnd, int64(lead.next))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
-	if segEnd > size || dataPos > segEnd {
-		return 0, 0, ErrTruncated
+	if dataPos > segEnd {
+		return 0, 0, false, ErrTruncated
 	}
-	return segEnd, dataPos, nil
+	if segEnd > size {
+		// Metadata is in the file and the declared raw section runs past EOF.
+		// WithLenientTail keeps earlier segments and the whole values that
+		// fit. The default still rejects the file.
+		if lenient && dataPos <= size {
+			return size, dataPos, true, nil
+		}
+		return 0, 0, false, ErrTruncated
+	}
+	return segEnd, dataPos, false, nil
 }
 
 const (
@@ -703,10 +721,13 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 	if uint64(nobj) > uint64(len(meta)) {
 		return nil, wrap("read", f.path, ErrCorrupt)
 	}
+	// The raw order is updated whether or not this segment carries raw bytes.
+	// A metadata-only segment that declares an index, or that drops a channel,
+	// is the order a following raw-only segment reuses. npTDMS does the same.
 	next := order
-	if hasRaw && (newList || !haveOrder) {
+	if newList || !haveOrder {
 		next = nil
-	} else if hasRaw {
+	} else {
 		next = append([]string(nil), order...)
 	}
 	removed := map[string]bool{}
@@ -759,17 +780,22 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 			}
 			ch.dt = dt
 			ch.hasDT = true
-			if hasRaw {
-				ch.idx = rawIndex{known: true, dt: dt, n: n, total: total}
-			}
+			// The index persists even when this segment has no raw bytes, so a
+			// later raw-only segment can use it.
+			ch.idx = rawIndex{known: true, dt: dt, n: n, total: total}
 		} else if mode == idxMatch {
-			if ch != nil && hasRaw {
+			if ch != nil {
 				if !ch.idx.known {
 					return nil, wrap("read", opath, fmt.Errorf("%w: raw index matches previous segment but there is none", ErrCorrupt))
 				}
+				// Matches-previous resumes the stored index. A prior 0xFFFFFFFF
+				// does not wipe that index.
+				ch.idx.none = false
 			}
-		} else if ch != nil && hasRaw {
-			ch.idx = rawIndex{known: true, none: true}
+		} else if ch != nil {
+			// 0xFFFFFFFF: this channel has no data in the current raw order.
+			// Keep dt/n/total so a later matches-previous can put it back.
+			ch.idx.none = true
 		}
 		nprops, err := d.u32()
 		if err != nil {
@@ -790,7 +816,7 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 				upsert(&ch.props, prop)
 			}
 		}
-		if !hasRaw || ch == nil {
+		if ch == nil {
 			continue
 		}
 		switch {
@@ -807,9 +833,6 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 	}
 	if d.remain() != 0 {
 		return nil, wrapf("read", f.path, ErrCorrupt, "%d unused metadata bytes", d.remain())
-	}
-	if !hasRaw {
-		return order, nil
 	}
 	compact := next[:0]
 	for _, p := range next {
@@ -1459,7 +1482,7 @@ func (sp *span) loadStringWindow(r io.ReaderAt, off int64, nAll, local, take int
 		if a < 0 || b < a || b > len(buf) {
 			return nil, ErrCorrupt
 		}
-		out[i] = string(buf[a:b])
+		out[i] = ignoreTrailingNUL(buf[a:b])
 		prev = ends[i]
 	}
 	return out, nil

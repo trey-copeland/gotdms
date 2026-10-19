@@ -9,7 +9,7 @@ Nothing here has been tagged or published. `v0.1.0` is the proposed first tag. [
 ## Before the tag
 
 1. Confirm `main` is the commit you mean. `git log -1` and the proposed `0.1.0` section in the changelog must still describe that commit.
-2. Confirm the latest run of `.github/workflows/build-and-test-go-module.yml` on that commit is green.
+2. Confirm the latest run of `.github/workflows/build-and-test-go-module.yml` on that commit is green, including the `differential test against npTDMS` job. That job installs npTDMS (LGPL-2.1) with pip as a CI-only oracle. It is not a Go dependency and is not shipped.
 3. From a clean checkout of that commit:
 
    ```bash

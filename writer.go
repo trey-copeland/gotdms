@@ -33,13 +33,14 @@ var metaReuse = true
 // A writer that cannot seek writes the lead-in with the finished length, then
 // the bytes, because the length is known before the raw section is streamed.
 //
-// On a little-endian host, Write retains a fixed-size numeric or complex
-// slice until Flush or Close instead of copying it. Do not mutate that slice
-// until Flush or Close returns; after that the writer no longer aliases it.
-// A later Write on the same channel copies any slice still retained. Bool,
-// timestamp, and extended values are encoded into the channel buffer at
-// Write. String headers are copied; string bytes are immutable. A big-endian
-// host copies numeric slices at Write so they can be stored little-endian.
+// Write copies values into the channel buffer. Mutating the caller's slice
+// after Write returns does not change the segment. WriteNoCopy is the
+// opt-in that skips that copy for a fixed-size numeric or complex slice on
+// a little-endian host; the caller must not mutate that slice until Flush
+// or Close returns. Bool, timestamp, and extended values are encoded into
+// the channel buffer at Write. String headers are copied; string bytes are
+// immutable. A big-endian host copies numeric slices at Write so they can
+// be stored little-endian.
 //
 // Flush streams the channel buffer through a large bufio.Writer (see
 // WithWriteBuffer). It does not allocate a second copy of a contiguous
@@ -291,17 +292,33 @@ func (c *ChannelWriter) SetProperty(name string, value any) error {
 // Float-with-unit channels take the same slices as the underlying float.
 // Repeated calls before Flush belong to one chunk.
 //
-// On a little-endian host, a fixed-size numeric or complex slice is retained
-// until Flush or Close, not copied. Mutating it before then changes the
-// segment. Bool, timestamp, and extended values are copied at Write. String
-// headers are copied. A big-endian host copies numeric slices at Write.
+// Write copies the values. Refilling the caller's slice and writing it
+// again does not change bytes already buffered. Use WriteNoCopy to skip
+// the copy for a fixed-size numeric or complex slice.
 func (c *ChannelWriter) Write(values any) error {
+	return c.writeValues(values, false)
+}
+
+// WriteNoCopy appends values without copying a fixed-size numeric or complex
+// slice on a little-endian host (and without copying a one-byte slice on any
+// host). The caller must not mutate that slice until Flush or Close returns.
+// A later Write or WriteNoCopy copies any slice still retained so the new
+// values can be appended. Bool, timestamp, extended, and string values are
+// copied at the call, the same as Write. A big-endian host copies multi-byte
+// numeric slices here too, so they can be stored little-endian.
+func (c *ChannelWriter) WriteNoCopy(values any) error {
+	return c.writeValues(values, true)
+}
+
+func (c *ChannelWriter) writeValues(values any, noCopy bool) error {
 	if err := c.w.busy(); err != nil {
 		return wrap("write", c.ch.path, err)
 	}
-	if view, n, ok := borrowedView(c.ch.dt, values); ok {
-		c.ch.retainView(view, n)
-		return nil
+	if noCopy {
+		if view, n, ok := borrowedView(c.ch.dt, values); ok {
+			c.ch.retainView(view, n)
+			return nil
+		}
 	}
 	if c.ch.aliased {
 		owned := append([]byte(nil), c.ch.raw...)
@@ -552,8 +569,10 @@ func (w *Writer) buildMetaBody(data []*wChannel, hasRaw bool) ([]byte, uint32, [
 	}
 	first := !w.started
 	newList := first || !prefixExtend(w.prevOrder, order)
-	// A segment with no raw data does not change channel order, so it does
-	// not need kTocNewObjList after the file has started.
+	// This writer does not reorder channels in a flush that has no raw
+	// bytes, so that flush does not set kTocNewObjList after the file has
+	// started. A file from another writer can still change the order in a
+	// metadata-only segment; the reader honors that.
 	if !hasRaw && !first {
 		newList = false
 	}

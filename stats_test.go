@@ -140,6 +140,136 @@ func TestChunkStatsIntegersAndExtended(t *testing.T) {
 	}
 }
 
+func TestChunkStatsFloat32AndInt16(t *testing.T) {
+	buf := &bytes.Buffer{}
+	w, err := NewWriter(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f32, err := w.Group("g").Channel("f", TypeFloat32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i16, err := w.Group("g").Channel("n", TypeInt16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fv := []float32{-1.5, 0, 2.5, 4, -8}
+	iv := []int16{-4, -1, 0, 3, 9, 2}
+	if err := f32.Write(fv); err != nil {
+		t.Fatal(err)
+	}
+	if err := i16.Write(iv); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := openBytes(t, buf.Bytes())
+	g, _ := f.Group("g")
+	fc, _ := g.Channel("f")
+	got := readStats(t, fc, 2)
+	asF := []float64{-1.5, 0, 2.5, 4, -8}
+	want := bruteStats(asF, 2)
+	for i := range want {
+		if !sameStat(got[i], want[i]) {
+			t.Fatalf("float32 stat %d: %+v want %+v", i, got[i], want[i])
+		}
+	}
+	ic, _ := g.Channel("n")
+	igot := readStats(t, ic, 4)
+	asI := []float64{-4, -1, 0, 3, 9, 2}
+	iwant := bruteStats(asI, 4)
+	for i := range iwant {
+		if !sameStat(igot[i], iwant[i]) {
+			t.Fatalf("int16 stat %d: %+v want %+v", i, igot[i], iwant[i])
+		}
+	}
+}
+
+func TestNumericConversions(t *testing.T) {
+	type row struct {
+		dt    DataType
+		write any
+		i64   []int64
+		f64   []float64
+		badI  bool
+	}
+	rows := []row{
+		{TypeInt8, []int8{-1, 2}, []int64{-1, 2}, []float64{-1, 2}, false},
+		{TypeInt16, []int16{-300, 4}, []int64{-300, 4}, []float64{-300, 4}, false},
+		{TypeInt32, []int32{1 << 20, -8}, []int64{1 << 20, -8}, []float64{1 << 20, -8}, false},
+		{TypeInt64, []int64{-9, 12}, []int64{-9, 12}, []float64{-9, 12}, false},
+		{TypeUint8, []uint8{0, 255}, []int64{0, 255}, []float64{0, 255}, false},
+		{TypeUint16, []uint16{1, 40000}, []int64{1, 40000}, []float64{1, 40000}, false},
+		{TypeUint32, []uint32{2, 3}, []int64{2, 3}, []float64{2, 3}, false},
+		{TypeUint64, []uint64{4, 5}, []int64{4, 5}, []float64{4, 5}, false},
+		{TypeUint64, []uint64{math.MaxUint64}, nil, []float64{float64(math.MaxUint64)}, true},
+		{TypeFloat32, []float32{-1.5, 2}, nil, []float64{-1.5, 2}, true},
+		{TypeFloat64, []float64{0.25, -4}, nil, []float64{0.25, -4}, true},
+		{TypeBool, []bool{true, false}, []int64{1, 0}, []float64{1, 0}, false},
+	}
+	for _, r := range rows {
+		buf := &bytes.Buffer{}
+		w, err := NewWriter(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := w.Group("g").Channel("c", r.dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ch.Write(r.write); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		f := openBytes(t, buf.Bytes())
+		g, _ := f.Group("g")
+		c, _ := g.Channel("c")
+		gotI, err := c.Int64s()
+		if r.badI {
+			if !errors.Is(err, ErrType) {
+				t.Fatalf("%s Int64s err = %v", r.dt, err)
+			}
+		} else if err != nil {
+			t.Fatalf("%s Int64s: %v", r.dt, err)
+		} else {
+			assertEqual(t, gotI, r.i64)
+		}
+		gotF, err := c.Float64s()
+		if err != nil {
+			t.Fatalf("%s Float64s: %v", r.dt, err)
+		}
+		if len(gotF) != len(r.f64) {
+			t.Fatalf("%s float len %d", r.dt, len(gotF))
+		}
+		for i := range r.f64 {
+			if math.Float64bits(gotF[i]) != math.Float64bits(r.f64[i]) {
+				t.Fatalf("%s float[%d] = %v want %v", r.dt, i, gotF[i], r.f64[i])
+			}
+		}
+		cur := c.Cursor(8)
+		if !cur.Next() {
+			t.Fatalf("%s cursor: %v", r.dt, cur.Err())
+		}
+		copied, err := cur.Float64sCopy()
+		cur.Close()
+		if err != nil {
+			t.Fatalf("%s Float64sCopy: %v", r.dt, err)
+		}
+		if len(copied) != len(r.f64) {
+			t.Fatalf("%s copy len %d", r.dt, len(copied))
+		}
+		for i := range r.f64 {
+			if math.Float64bits(copied[i]) != math.Float64bits(r.f64[i]) {
+				t.Fatalf("%s copy[%d] = %v", r.dt, i, copied[i])
+			}
+		}
+	}
+}
+
 func TestChunkStatsRejectsNonNumeric(t *testing.T) {
 	buf := &bytes.Buffer{}
 	w, err := NewWriter(buf)

@@ -122,7 +122,7 @@ func TestInfoAndConvert(t *testing.T) {
 	wantCSV := strings.Join([]string{
 		"/'acquisition'/'temperature',/'acquisition'/'Time',/'acquisition'/'label',/'acquisition'/'stamp'",
 		"21.5,1.25,a," + when.Format(time.RFC3339Nano),
-		"22,,\"b,c\",",
+		"22,#N/A,\"b,c\",#N/A",
 		"",
 	}, "\n")
 	if stdout.String() != wantCSV {
@@ -150,6 +150,41 @@ func TestInfoAndConvert(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatal("wrote to stdout and -o")
+	}
+}
+
+func TestConvertEmptyStringAndMissingSample(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gap.tdms")
+	w, err := tdms.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := w.Group("g")
+	s, err := g.Channel("s", tdms.TypeString)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write([]string{"", "x"}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := g.Channel("n", tdms.TypeInt32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Write([]int32{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"convert", "--group", "g", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("convert: %d %s", code, stderr.String())
+	}
+	want := "/'g'/'s',/'g'/'n'\n,1\nx,#N/A\n"
+	if stdout.String() != want {
+		t.Fatalf("csv:\n%s\nwant:\n%s", stdout.String(), want)
 	}
 }
 

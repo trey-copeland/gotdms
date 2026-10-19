@@ -24,10 +24,11 @@ func growExact(dst []byte, n int) []byte {
 }
 
 // borrowedView is the little-endian byte view of a fixed numeric or complex
-// slice. handled is true when Write should retain that view instead of
+// slice. handled is true when WriteNoCopy should retain that view instead of
 // copying. Empty slices are handled and contribute no bytes. A big-endian
 // host returns handled false for widths above one byte so appendEncoded can
 // byte-swap. Bool, timestamp, extended, and string values are not views.
+// Write itself does not call borrowedView; it always copies.
 func borrowedView(dt DataType, values any) (b []byte, n int, handled bool) {
 	if values == nil {
 		return nil, 0, true

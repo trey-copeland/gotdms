@@ -369,9 +369,15 @@ func TestNonMonotonic(t *testing.T) {
 	if !occ.Start.Equal(epoch) || !occ.Last.Equal(epoch.Add(4*time.Second)) || occ.Dt != 2 {
 		t.Fatalf("span start=%s last=%s dt=%v", occ.Start, occ.Last, occ.Dt)
 	}
-	_, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(500*time.Millisecond))
+	// A window that does not include the backwards step reads that range with
+	// CursorAt/Slice and does not decode the rest of the axis.
+	narrow, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(500*time.Millisecond))
+	if err != nil || !sameFloats(narrow.Y, []float64{1}) {
+		t.Fatalf("narrow window Y=%v err=%v", narrow.Y, err)
+	}
+	_, err = ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(5*time.Second))
 	if !errors.Is(err, ErrMonotonic) {
-		t.Fatalf("window err = %v", err)
+		t.Fatalf("wide window err = %v", err)
 	}
 	_, err = ds.Read(Selector{Name: "ai0"})
 	if !errors.Is(err, ErrMonotonic) {

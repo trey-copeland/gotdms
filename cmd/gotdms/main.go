@@ -11,7 +11,8 @@
 // The header cell is the channel's TDMS object path. Omit both --group and
 // --channel to export every channel. Timestamps are UTC RFC3339Nano because
 // the channel's data type is tdsTypeTimeStamp; a channel is not treated as
-// time because of its name.
+// time because of its name. A present empty string is an empty field. A
+// missing sample (the channel is shorter than the row) is the cell #N/A.
 package main
 
 import (
@@ -38,6 +39,8 @@ the channel's TDMS path. With no --group and no --channel, every channel is
 a column. --group alone writes that group. --channel selects one channel and
 requires --group when the name occurs in more than one group. Timestamps are
 UTC RFC3339Nano. The format follows the channel data type, not the name.
+A present empty string is an empty field. A row where that channel has no
+sample is the cell #N/A. A string value that is itself #N/A looks the same.
 `
 
 func run(args []string, stdout, stderr io.Writer) int {

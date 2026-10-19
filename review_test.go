@@ -865,7 +865,7 @@ func TestScaledWaveformDoesNotMutate(t *testing.T) {
 	assertEqual(t, rawI, []int16{4, 5, 6})
 }
 
-func TestWriteRetainsSlice(t *testing.T) {
+func TestWriteCopiesSlice(t *testing.T) {
 	data := []float64{1, 2, 3}
 	var buf bytes.Buffer
 	w := newBufWriter(t, &buf)
@@ -877,7 +877,6 @@ func TestWriteRetainsSlice(t *testing.T) {
 	if err := w.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	data[0] = 4
 	more := []float64{5, 6}
 	extra := []float64{7}
 	if err := ch.Write(more); err != nil {
@@ -886,7 +885,6 @@ func TestWriteRetainsSlice(t *testing.T) {
 	if err := ch.Write(extra); err != nil {
 		t.Fatal(err)
 	}
-	// The second Write copied both slices into an owned buffer.
 	more[0] = 0
 	extra[0] = 0
 	if err := w.Close(); err != nil {
@@ -895,7 +893,7 @@ func TestWriteRetainsSlice(t *testing.T) {
 	f := openBytes(t, buf.Bytes())
 	g, _ := f.Group("g")
 	c, _ := g.Channel("c")
-	assertEqual(t, mustValues(t, c), []float64{9, 2, 3, 5, 6, 7})
+	assertEqual(t, mustValues(t, c), []float64{1, 2, 3, 5, 6, 7})
 
 	// Bool values are copied at Write.
 	var bb bytes.Buffer
@@ -913,6 +911,58 @@ func TestWriteRetainsSlice(t *testing.T) {
 	bg, _ := bf.Group("g")
 	bch, _ := bg.Channel("b")
 	assertEqual(t, mustValues(t, bch), []bool{true, false})
+}
+
+// TestWriteRefillDoesNotCorrupt is the buffer-reuse case that used to keep
+// the caller's first slice: refilling it and writing again replaced the
+// already buffered chunk, so the file read back as [10 11 12 10 11 12 20 21 22].
+func TestWriteRefillDoesNotCorrupt(t *testing.T) {
+	buf := []int32{0, 1, 2}
+	var out bytes.Buffer
+	w := newBufWriter(t, &out)
+	ch := mustCh(t, w, "g", "c", TypeInt32)
+	for _, base := range []int32{0, 10, 20} {
+		for i := range buf {
+			buf[i] = base + int32(i)
+		}
+		if err := ch.Write(buf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := openBytes(t, out.Bytes())
+	g, _ := f.Group("g")
+	c, _ := g.Channel("c")
+	assertEqual(t, mustValues(t, c), []int32{0, 1, 2, 10, 11, 12, 20, 21, 22})
+}
+
+func TestWriteNoCopyRetainsUntilFlush(t *testing.T) {
+	data := []float64{1, 2, 3}
+	var buf bytes.Buffer
+	w := newBufWriter(t, &buf)
+	ch := mustCh(t, w, "g", "c", TypeFloat64)
+	if err := ch.WriteNoCopy(data); err != nil {
+		t.Fatal(err)
+	}
+	// The first slice is retained. Mutating it before the next write changes
+	// the buffered chunk.
+	data[0] = 9
+	more := []float64{5, 6}
+	if err := ch.WriteNoCopy(more); err != nil {
+		t.Fatal(err)
+	}
+	// The second call copied both slices into an owned buffer.
+	data[0] = 4
+	more[0] = 0
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f := openBytes(t, buf.Bytes())
+	g, _ := f.Group("g")
+	c, _ := g.Channel("c")
+	assertEqual(t, mustValues(t, c), []float64{9, 2, 3, 5, 6})
 }
 
 func TestMetaCacheSkipsRebuild(t *testing.T) {

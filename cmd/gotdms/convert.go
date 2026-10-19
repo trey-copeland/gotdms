@@ -100,10 +100,16 @@ func selectChannels(f *tdms.File, group, channel string) ([]*tdms.Channel, error
 	}
 }
 
+// csvMissing is the cell written when a channel has no sample at that row.
+// A present empty string stays an empty field, so the two are not the same
+// cell. A string whose value is these four characters is written the same
+// way; CSV has no separate missing-value type.
+const csvMissing = "#N/A"
+
 // writeChannelsCSV streams one column per channel. Rows line up by sample
-// index. A channel that ends early leaves the rest of its column empty.
-// Each column is read with Cursor in batches, so the whole channel is not
-// held at once.
+// index. A channel that ends early writes csvMissing for the rest of its
+// column. A present empty string is an empty field. Each column is read
+// with Cursor in batches, so the whole channel is not held at once.
 func writeChannelsCSV(w io.Writer, chs []*tdms.Channel) error {
 	cols := make([]csvCol, len(chs))
 	header := make([]string, len(chs))
@@ -118,6 +124,9 @@ func writeChannelsCSV(w io.Writer, chs []*tdms.Channel) error {
 	}
 	for {
 		row := make([]string, len(cols))
+		for i := range row {
+			row[i] = csvMissing
+		}
 		any := false
 		for i := range cols {
 			s, ok, err := cols[i].next()

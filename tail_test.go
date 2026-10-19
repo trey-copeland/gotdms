@@ -75,6 +75,67 @@ func TestFollowDeliversAppendedSegments(t *testing.T) {
 	}
 }
 
+func TestFollowLenientTailStaysUncommitted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live.tdms")
+	writeFloatSegment(t, path, []float64{1, 2}, true)
+	if err := appendFloatSegment(path, []float64{3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := append([]byte(nil), raw[len(raw)-3:]...)
+	if err := os.WriteFile(path, raw[:len(raw)-3], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tail, err := Follow(ctx, path, "g", "c", WithTailInterval(5*time.Millisecond), WithTailBatch(8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tail.Close()
+
+	errc := make(chan error, 1)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			errc <- err
+			cancel()
+			return
+		}
+		if _, err := f.Write(missing); err != nil {
+			f.Close()
+			errc <- err
+			cancel()
+			return
+		}
+		errc <- f.Close()
+		time.Sleep(40 * time.Millisecond)
+		cancel()
+	}()
+
+	var got []float64
+	for tail.Next() {
+		batch, ok := tail.Values().([]float64)
+		if !ok {
+			t.Fatalf("%T", tail.Values())
+		}
+		got = append(got, batch...)
+	}
+	if !errors.Is(tail.Err(), context.Canceled) {
+		t.Fatalf("err %v", tail.Err())
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, []float64{1, 2, 3, 4})
+}
+
 func TestFollowClose(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "live.tdms")

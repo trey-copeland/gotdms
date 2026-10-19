@@ -40,10 +40,15 @@ import (
 //
 // Invalidation: size, modification time, device, inode, fingerprint, and the
 // payload checksum must all match. Any miss, or any decode error, discards
-// the sidecar and parses the file. A cache hit does not decode segment
-// headers. Sample bytes are read from the file either way, so an in-place
-// change to raw samples is visible on a hit. A change to lead-ins or metadata
-// changes the fingerprint and forces a parse.
+// the sidecar and parses the file. A cache hit still reads every lead-in and
+// the metadata bytes that follow it, in order to recompute that fingerprint;
+// it does not decode object paths, raw-data indexes, or properties out of
+// those bytes. The object tree and the spans come from the sidecar. Sample
+// bytes are read from the file either way, so an in-place change to raw
+// samples is visible on a hit. A change to lead-ins or metadata changes the
+// fingerprint and forces a parse. A span that would address bytes outside
+// the file, or that claims more samples than the file can hold, is a decode
+// error and therefore a cache miss.
 
 const (
 	segmentIndexMagic   = "GTDX"
@@ -241,7 +246,7 @@ func segmentFingerprint(r interface {
 		if lead.toc&TocDAQmxRawData != 0 {
 			return 0, ErrDAQmx
 		}
-		segEnd, _, err := segmentBounds(pos, size, lead)
+		segEnd, _, _, err := segmentBounds(pos, size, lead, false)
 		if err != nil {
 			return 0, err
 		}
@@ -490,7 +495,86 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 	if anyLive && !img.incomplete {
 		return nil, errIndex
 	}
+	if err := spansInFile(img); err != nil {
+		return nil, err
+	}
 	return img, nil
+}
+
+// spansInFile rejects a sidecar whose spans address bytes outside the file
+// they claim to describe, or whose sample counts cannot fit in that file.
+// decodeSegmentIndex returns errIndex, and Open treats that as a cache miss.
+func spansInFile(img *indexImage) error {
+	if img.size < 0 {
+		return errIndex
+	}
+	for _, g := range img.groups {
+		for _, ch := range g.channels {
+			for _, sp := range ch.spans {
+				if err := spanInFile(sp, img.size); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func spanInFile(sp span, size int64) error {
+	if sp.dataPos < 0 || sp.dataPos > size {
+		return errIndex
+	}
+	if sp.nChunks > 0 {
+		region, err := mul64(sp.nChunks, sp.chunkSize)
+		if err != nil {
+			return errIndex
+		}
+		end, err := add64(sp.dataPos, region)
+		if err != nil || end > size {
+			return errIndex
+		}
+		if sp.chunkSize == 0 && (sp.nPerChunk > 0 || sp.strSize > 0) {
+			return errIndex
+		}
+	}
+	samples, err := spanTotal([]span{sp})
+	if err != nil || samples < 0 {
+		return errIndex
+	}
+	if sp.str {
+		if sp.nPerChunk > 0 {
+			table, err := mul64(sp.nPerChunk, 4)
+			if err != nil || sp.strSize < table {
+				return errIndex
+			}
+		}
+		if sp.nChunks > 0 {
+			bytes, err := mul64(sp.nChunks, sp.strSize)
+			if err != nil || bytes > size {
+				return errIndex
+			}
+		}
+		if sp.partialN > 0 && (sp.partialPos < 0 || sp.partialPos > size) {
+			return errIndex
+		}
+		return nil
+	}
+	if samples > 0 {
+		if sp.typeSize <= 0 || sp.typeSize > 16 {
+			return errIndex
+		}
+		bytes, err := mul64(samples, int64(sp.typeSize))
+		if err != nil || bytes > size {
+			return errIndex
+		}
+		if sp.nPerChunk > 1 && sp.stride <= 0 {
+			return errIndex
+		}
+	}
+	if sp.partialN > 0 && (sp.partialPos < 0 || sp.partialPos > size) {
+		return errIndex
+	}
+	return nil
 }
 
 func spanTotal(spans []span) (int64, error) {

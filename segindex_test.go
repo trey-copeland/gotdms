@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"math"
 	"os"
 	"path/filepath"
@@ -403,6 +404,88 @@ func TestSegmentIndexBigEndianAndIncomplete(t *testing.T) {
 	if c.committed() != 0 {
 		t.Fatalf("committed %d", c.committed())
 	}
+}
+
+func TestSegmentIndexAdversarialLengths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.tdms")
+	w, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := w.Group("g").Channel("c", TypeInt32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Write([]int32{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	side := SegmentIndexPath(path)
+	f, err := Open(path, WithSegmentIndex(side))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	blob, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blob) < segmentIndexHeader+spanRecord+8 {
+		t.Fatalf("sidecar len %d", len(blob))
+	}
+	spanAt := len(blob) - 8 - spanRecord
+	if got := int64(binary.LittleEndian.Uint64(blob[spanAt+16:])); got != 1 {
+		t.Fatalf("nChunks at %d = %d; span is not where this test assumed", spanAt, got)
+	}
+	if got := int64(binary.LittleEndian.Uint64(blob[spanAt+24:])); got != 3 {
+		t.Fatalf("nPerChunk = %d", got)
+	}
+	if got := binary.LittleEndian.Uint32(blob[spanAt+48:]); got != 4 {
+		t.Fatalf("typeSize = %d", got)
+	}
+
+	patch := func(edit func([]byte)) {
+		t.Helper()
+		b := append([]byte(nil), blob...)
+		edit(b)
+		binary.LittleEndian.PutUint32(b[44:48], crc32.ChecksumIEEE(b[segmentIndexHeader:]))
+		if _, err := decodeSegmentIndex(b); err == nil {
+			t.Fatal("crafted sidecar decoded")
+		}
+		if err := os.WriteFile(side, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := Open(path, WithSegmentIndex(side))
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		defer f.Close()
+		if f.SegmentIndexUsed() {
+			t.Fatal("crafted sidecar was used")
+		}
+		g, _ := f.Group("g")
+		c, _ := g.Channel("c")
+		assertEqual(t, mustValues(t, c), []int32{1, 2, 3})
+	}
+
+	patch(func(b []byte) {
+		// More chunks than the file can hold. total must agree or the
+		// length check fails before the span-in-file check.
+		nChunks := int64(1) << 40
+		binary.LittleEndian.PutUint64(b[spanAt+16:], uint64(nChunks))
+		binary.LittleEndian.PutUint64(b[len(b)-8:], uint64(nChunks*3))
+	})
+	patch(func(b []byte) {
+		binary.LittleEndian.PutUint64(b[spanAt:], uint64(1)<<40)
+	})
+	patch(func(b []byte) {
+		n := int64(1) << 60
+		binary.LittleEndian.PutUint64(b[spanAt+24:], uint64(n))
+		binary.LittleEndian.PutUint64(b[len(b)-8:], uint64(n))
+	})
 }
 
 func writeIndexedFile(t *testing.T, path string) {

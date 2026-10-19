@@ -24,11 +24,15 @@ const DefaultTailInterval = 100 * time.Millisecond
 // sentinel is skipped, including whole values already flushed into it.
 // Channel.Len on a normal Open still includes those values; Tail does not.
 //
-// A segment whose lead-in names a length past EOF makes Open return
-// ErrTruncated. Tail treats that, and a file that does not exist yet, as
-// "the writer has not finished" and polls again. Any other open or read
-// error stops the tail. Cancel the context to stop a file that stays
-// truncated. Close cancels the wait without setting Err.
+// A segment whose lead-in names a length past EOF is opened with
+// WithLenientTail. Samples that belong to that partial segment are not
+// committed, so Next does not deliver them; earlier finished segments are.
+// When a later poll sees the declared length, those samples become
+// committed. A file that does not exist yet, or a read that still returns
+// ErrTruncated (a short trailing lead-in, or metadata that itself runs past
+// EOF), is "the writer has not finished" and is polled again. Any other
+// open or read error stops the tail. Cancel the context to stop. Close
+// cancels the wait without setting Err.
 //
 // The channel is chosen by its group and channel names. Nothing is inferred
 // from the name: a channel named Time is tailed as whatever DataType it has.
@@ -167,7 +171,9 @@ func (t *Tail) sleep() bool {
 // new finished samples yet. ErrTruncated and a missing file are reported as
 // ok false so the caller polls again.
 func (t *Tail) pull() (any, bool, error) {
-	f, err := Open(t.path)
+	// Lenient tail keeps earlier finished segments when the last lead-in
+	// names a length past EOF. Those tail samples are not committed.
+	f, err := Open(t.path, WithLenientTail())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrTruncated) {
 			return nil, false, nil

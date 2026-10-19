@@ -6,12 +6,38 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
-- `cmd/gotdms` prints file structure (`info`, optionally `--json`) and writes channel samples as CSV (`convert`). The CSV has a header row. Timestamps are UTC RFC3339Nano because the channel type is a timestamp, not because of the channel name.
+### Breaking
+
+- `ChannelWriter.Write` copies its slice. On a little-endian host the first `Write` of a fixed-size numeric or complex slice used to retain the caller's memory, so refilling that slice and writing it again changed bytes already buffered. `Write` now copies. `WriteNoCopy` is the explicit opt-in that retains the slice; the caller must not mutate it until `Flush` or `Close` returns. Bool, timestamp, extended, and string values were already copied. Nothing in this module has been tagged, so the change is in the unreleased tree.
+
+### Added
+
+- `WithLenientTail` opens a file whose final segment declares a finite next-segment offset past EOF. Earlier segments are kept, and whole values that fit in the partial tail are readable. `File.Status.Truncated` reports that recovery. `PartialTail` and `UnusedTail` describe the tail the same way they describe an incomplete sentinel. The default `Open` still returns `ErrTruncated`. A short trailing lead-in, or metadata that itself runs past EOF, is still `ErrTruncated`.
+- `Follow` opens with `WithLenientTail`. Samples in that past-EOF tail are not committed, so `Next` delivers earlier finished segments and waits for the declared length.
+- `cmd/gotdms convert` writes `#N/A` when a channel has no sample on that row. A present empty string stays an empty field. A string value that is itself `#N/A` looks the same.
+- `cmd/gotdms info --json` includes `status.truncated`.
+- CI job `differential test against npTDMS` writes files with npTDMS and reads them with gotdms, and the other way around. npTDMS is LGPL-2.1, installed with pip in that job only, and is not linked or shipped. The harness is `testdata/nptdms`. There is no LabVIEW in this environment, so npTDMS is the external anchor.
+- `FuzzSegmentIndex` fuzzes `.gtdx` decoding. `FuzzReader` seeds now include a multi-segment file, a string channel, and an interleaved segment.
+- `TestGoldenNIFiveSegments` decodes the NI article's full five-segment worked example from the article's hex.
+
+### Fixed
+
+- A metadata-only segment that declares a raw-data index, or that changes the object list, updates the order a following raw-only segment uses. A channel that drops out is not given another channel's samples. A raw section whose length is not a multiple of the current chunk, and that is not an incomplete or lenient tail, returns `ErrCorrupt`.
+- Length-prefixed strings drop one trailing NUL on read, which is what the TDMS article specifies. A NUL that is not the last byte is kept. The writer does not add one. A string that ends in NUL does not round-trip that byte.
+- Dataset waveform windows and positive-step timestamp windows read the sample range with `CursorAt` and `Slice`. Samples before the window are not decoded. A clock that does not match the catalog step is still decoded in full.
+- A `.gtdx` span that addresses bytes outside the file, or that claims more samples than the file can hold, is a decode error. `Open` treats that as a cache miss.
+
+### Changed
+
+- README benchmark table remeasured with `-count=10 -benchtime=100ms`. Medians are by hand (benchstat is not vendored). `Write` of 128 MiB to a file is 1403 MB/s and 129.00 MiB/op after the copy (2989 MB/s and 1.00 MiB/op when the first slice was aliased). `BenchmarkReadWindowTail` is 25.4 µs and 8025 B/op (was 32.0 ms and 40.01 MiB/op). `BenchmarkReadWindowTailWaveform` is 13.1 µs and 7065 B/op (was 536 µs and 69.4 KiB/op).
+- Extended-float comments state that the 10-byte layout is spec-derived and has no NI fixture. The bytes are unchanged.
+
+- `cmd/gotdms` prints file structure (`info`, optionally `--json`) and writes channel samples as CSV (`convert`). The CSV has a header row. Timestamps are UTC RFC3339Nano because the channel type is a timestamp, not because of the channel name. A missing sample is `#N/A`. An empty string is an empty field.
 - `Channel.ChunkStats` reports count, min, max, mean, and RMS for each chunk of a numeric channel in one Cursor pass. The caller chooses the chunk size in samples. String, boolean, timestamp, and complex channels return `ErrType`.
-- `File.Status` reports a clean end or an incomplete final segment (the NI `0xFFFFFFFFFFFFFFFF` next-segment offset), including a short tail. Reads of files that open are unchanged: whole values in that tail are still returned.
-- `Follow` polls a file that is still being written and yields new samples for one channel. Samples that belong to a segment whose lead-in is still the incomplete sentinel are not delivered. The context cancels the wait. `WithTailInterval` and `WithTailBatch` set the poll period and the batch size.
+- `File.Status` reports a clean end, an incomplete final segment (the NI `0xFFFFFFFFFFFFFFFF` next-segment offset), or a truncated tail opened with `WithLenientTail`. Reads of files that open still return whole values in that tail.
+- `Follow` polls a file that is still being written and yields new samples for one channel. Samples that belong to a segment whose lead-in is still the incomplete sentinel, and samples recovered from a past-EOF tail, are not delivered. The context cancels the wait. `WithTailInterval` and `WithTailBatch` set the poll period and the batch size.
 - `WithSegmentIndex` restores segment layout from a sidecar when the file's size, modification time, device and inode (when the platform has them), and an IEEE CRC-32 of the lead-ins and metadata still match. Raw samples are not cached. A missing, stale, or corrupt sidecar is ignored and the file is parsed. The sidecar is replaced by a temporary file and `rename`. `SegmentIndexPath` is the conventional `path + ".gtdx"`. `dataset.WithSegmentIndex` opts the catalog and its reads into that cache.
-- `Writer.Stream`, `ChannelWriter.Stream`, and `ChannelWriter.StreamWaveform` write one segment whose sample counts are declared up front. Chunks are copied to the underlying writer as they arrive, so a large channel is not held until `Flush`. `Write` and `Flush` are unchanged.
+- `Writer.Stream`, `ChannelWriter.Stream`, and `ChannelWriter.StreamWaveform` write one segment whose sample counts are declared up front. Chunks are copied to the underlying writer as they arrive, so a large channel is not held until `Flush`. `Flush` still streams the channel buffer. `Write` copies; see the breaking note above.
 - String channels return `ErrUnsupported` from `Stream` (the offset table needs every length). A short or failed stream is left incomplete on a seekable writer and truncated on a non-seekable writer; it is not patched into a finished segment.
 - Removed `bridge/`. The Python bridge was developed in this repository and extracted to [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python) on 2026-10-19 (commit `ae5e15b`; the work spanned 2026-10-18/19). This repository no longer ships that tree. The package is not on PyPI, and nothing here has been tagged.
 - Renamed the GitHub Actions workflows. `.github/workflows/ci.yml` (`name: ci`) is now `.github/workflows/build-and-test-go-module.yml` (`Build and test Go module`). `.github/workflows/release.yml` (`name: release`) is now `.github/workflows/test-and-publish-go-release.yml` (`Test and publish Go module release`). Triggers and steps are unchanged. The release workflow still runs only on a `v*` tag.

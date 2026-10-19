@@ -81,15 +81,13 @@
 // disagrees with the first. ReadMany of several channels in one file opens
 // that file once and decodes a shared clock once; each series then gets its
 // own copy of the time vector so later mutation does not alias. Returned
-// slices are owned by the Series. The paired data channel is decoded in full
-// on read. Waveform fallback does not load samples to build the span. main
-// exports SegmentCount and Len, not per-segment sample bounds, so a waveform
-// window cannot skip a leading segment. Cursor starts at the first sample.
-// Batches before the window are decoded and discarded, values inside the
-// window are copied out (a cursor batch is only valid until the next Next),
-// and the walk stops at the window. A window at the end of a long channel
-// still decodes the prefix. Sample i is StartTime plus i times Increment, rounded
-// to the nearest nanosecond in one multiply.
+// slices are owned by the Series. Waveform fallback does not load samples to
+// build the span. A waveform window and a declared clock whose catalog step
+// is positive read the sample range with CursorAt and Slice. The samples
+// before the window are not decoded. A declared clock that does not match
+// that step is decoded in full so a backwards step is still reported.
+// Sample i is StartTime plus i times Increment, rounded to the nearest
+// nanosecond in one multiply.
 //
 // Waveform properties are the latest wf_start_time and wf_increment on the
 // channel. Segments that append under that same t0 and dt are correct. A later
