@@ -1,5 +1,3 @@
 *.tdms
 *.tdms_index
 agent-tools/
-__pycache__/
-*.pyc

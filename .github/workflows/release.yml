@@ -41,13 +41,6 @@ jobs:
         run: go test -race .
       - name: race dataset
         run: go test -race ./dataset/
-      # bridge/ is its own module, so the root go test does not enter it.
-      # The tagged tree still contains it.
-      - name: bridge module
-        working-directory: bridge
-        run: |
-          go vet ./...
-          go test ./...
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

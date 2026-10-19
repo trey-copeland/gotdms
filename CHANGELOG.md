@@ -8,6 +8,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 - `Writer.Stream`, `ChannelWriter.Stream`, and `ChannelWriter.StreamWaveform` write one segment whose sample counts are declared up front. Chunks are copied to the underlying writer as they arrive, so a large channel is not held until `Flush`. `Write` and `Flush` are unchanged.
 - String channels return `ErrUnsupported` from `Stream` (the offset table needs every length). A short or failed stream is left incomplete on a seekable writer and truncated on a non-seekable writer; it is not patched into a finished segment.
+- Removed `bridge/`. The Python bridge was developed in this repository and extracted to [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python) on 2026-10-19 (commit `ae5e15b`; the work spanned 2026-10-18/19). This repository no longer ships that tree. The package is not on PyPI, and nothing here has been tagged.
 
 ## 0.1.0 (proposed, not tagged)
 
@@ -44,10 +45,4 @@ Proposed notes for `main` at `795c8b1` ("Add a Polars bridge off npTDMS onto the
 
 ### Bridge
 
-`bridge/` is in this tree and is still pending extraction to its own repository. It is a separate module, `github.com/trey-copeland/gotdms-python`, so `go test ./...` in the core module does not enter it. The Python distribution name in that tree is `gotdms`. Nothing has been registered or uploaded.
-
-- Protocol version 1 between `gotdms-bridge` and the Python client. Sample columns are Arrow IPC, not JSON or base64.
-- Polars frames and NumPy arrays. Raw samples unless `scaled` is set.
-- Wheels and an sdist are described in `bridge/`, including a tag-gated PyPI job that does nothing until that repository and a trusted publisher exist.
-
-Tagging `github.com/trey-copeland/gotdms` does not publish that Python package and does not create the `gotdms-python` repository.
+The Python bridge was developed in-tree under `bridge/` and merged at `795c8b1`. It was its own Go module, so `go test ./...` in this module never entered it. It was extracted to [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python) on 2026-10-19 (`ae5e15b`) and is no longer shipped from this repository. It is not on PyPI. A tag of `github.com/trey-copeland/gotdms` does not publish it.
