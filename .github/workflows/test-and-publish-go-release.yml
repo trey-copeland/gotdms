@@ -2,10 +2,10 @@
 # This file does nothing until it is on main and a v* tag is pushed.
 # It does not build binaries, it does not publish to PyPI, and it does not
 # call the module proxy. The proxy fetches the tag from GitHub on its own.
-# .github/workflows/ci.yml is the pull-request CI. This workflow does not
-# duplicate it.
+# .github/workflows/build-and-test-go-module.yml is the pull-request CI.
+# This workflow does not duplicate it.
 
-name: release
+name: 'Test and publish Go module release'
 
 on:
   push:

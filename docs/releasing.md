@@ -4,12 +4,12 @@ A Go library is distributed by a version tag. The module proxy (`proxy.golang.or
 
 Nothing here has been tagged or published. `v0.1.0` is the proposed first tag. [CHANGELOG.md](../CHANGELOG.md) describes the reader and writer, analog waveforms and range reads, the dataset package, and CI. The Python package is [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python). It was extracted from this repository on 2026-10-19 and is not on PyPI. This checklist does not publish it.
 
-`.github/workflows/ci.yml` is already on `main`. This checklist requires that workflow to be green for the commit you tag. This document does not add a second copy of that CI workflow. `.github/workflows/release.yml` is separate: it runs only on a `v*` tag, re-checks this module, and opens a GitHub Release. It does not build binaries, it does not publish to PyPI, and it does not talk to the module proxy. It does nothing until it is on `main` and someone pushes a tag.
+`.github/workflows/build-and-test-go-module.yml` is already on `main`. This checklist requires that workflow to be green for the commit you tag. This document does not add a second copy of that workflow. `.github/workflows/test-and-publish-go-release.yml` is separate: it runs only on a `v*` tag, re-checks this module, and opens a GitHub Release. It does not build binaries, it does not publish to PyPI, and it does not talk to the module proxy. It does nothing until it is on `main` and someone pushes a tag.
 
 ## Before the tag
 
 1. Confirm `main` is the commit you mean. `git log -1` and the proposed `0.1.0` section in the changelog must still describe that commit.
-2. Confirm the latest CI run on that commit is green. CI is `.github/workflows/ci.yml`.
+2. Confirm the latest run of `.github/workflows/build-and-test-go-module.yml` on that commit is green.
 3. From a clean checkout of that commit:
 
    ```bash
@@ -45,7 +45,7 @@ git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-Pushing the tag is what arms `.github/workflows/release.yml`, and only after that file is on the tagged commit. The workflow runs `gofmt`, `go vet`, `go test ./...`, `go test -race .`, and `go test -race ./dataset/`, with the Go version in `go.mod`, then:
+Pushing the tag is what arms `.github/workflows/test-and-publish-go-release.yml`, and only after that file is on the tagged commit. The workflow runs `gofmt`, `go vet`, `go test ./...`, `go test -race .`, and `go test -race ./dataset/`, with the Go version in `go.mod`, then:
 
 ```bash
 gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

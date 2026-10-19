@@ -9,6 +9,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 - `Writer.Stream`, `ChannelWriter.Stream`, and `ChannelWriter.StreamWaveform` write one segment whose sample counts are declared up front. Chunks are copied to the underlying writer as they arrive, so a large channel is not held until `Flush`. `Write` and `Flush` are unchanged.
 - String channels return `ErrUnsupported` from `Stream` (the offset table needs every length). A short or failed stream is left incomplete on a seekable writer and truncated on a non-seekable writer; it is not patched into a finished segment.
 - Removed `bridge/`. The Python bridge was developed in this repository and extracted to [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python) on 2026-10-19 (commit `ae5e15b`; the work spanned 2026-10-18/19). This repository no longer ships that tree. The package is not on PyPI, and nothing here has been tagged.
+- Renamed the GitHub Actions workflows. `.github/workflows/ci.yml` (`name: ci`) is now `.github/workflows/build-and-test-go-module.yml` (`Build and test Go module`). `.github/workflows/release.yml` (`name: release`) is now `.github/workflows/test-and-publish-go-release.yml` (`Test and publish Go module release`). Triggers and steps are unchanged. The release workflow still runs only on a `v*` tag.
 
 ## 0.1.0 (proposed, not tagged)
 

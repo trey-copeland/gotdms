@@ -1,6 +1,6 @@
 # gotdms
 
-[![CI](https://github.com/trey-copeland/gotdms/actions/workflows/ci.yml/badge.svg)](https://github.com/trey-copeland/gotdms/actions/workflows/ci.yml)
+[![Build and test Go module](https://github.com/trey-copeland/gotdms/actions/workflows/build-and-test-go-module.yml/badge.svg)](https://github.com/trey-copeland/gotdms/actions/workflows/build-and-test-go-module.yml)
 
 A pure Go reader and writer for NI TDMS 2.0 files. No cgo. The Go package name is `tdms`; the module path is `github.com/trey-copeland/gotdms`.
 
