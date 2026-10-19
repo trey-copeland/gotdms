@@ -18,6 +18,17 @@ go get github.com/trey-copeland/gotdms
 import "github.com/trey-copeland/gotdms"
 ```
 
+The `gotdms` command reads a file and writes CSV. From a checkout:
+
+```bash
+go run ./cmd/gotdms info run.tdms
+go run ./cmd/gotdms info --json run.tdms
+go run ./cmd/gotdms convert -o run.csv run.tdms
+go run ./cmd/gotdms convert --group acquisition --channel temperature -o temp.csv run.tdms
+```
+
+`info` prints the file, each group, and each channel with its data type, sample count, and properties at every level. `--json` prints that tree as JSON. `convert` writes one CSV column per channel and a header row. The header cell is the channel's TDMS path (`/'group'/'channel'`). With no `--group` and no `--channel`, every channel is a column. `--group` alone writes that group. `--channel` selects one channel and needs `--group` when the name is used in more than one group. Timestamp values are UTC RFC3339Nano because the data type is `tdsTypeTimeStamp`. A channel named `Time` that stores floats is written as numbers.
+
 From a checkout of this repository:
 
 ```bash
@@ -107,7 +118,7 @@ for cur.Next() {
 return cur.Err()
 ```
 
-`Open` and `NewReader` parse every segment's metadata and do not load raw samples. `NewReader` accepts an `io.ReaderAt` that can report its length (`*os.File`, `*bytes.Reader`, `*io.SectionReader`, or any `io.Seeker`). `Values` and the typed helpers read through `ReadAt`, so concurrent reads are safe when the underlying reader is. `Cursor` scans sequentially through a 256 KiB buffer (`WithReadBuffer`).
+`Open` and `NewReader` parse every segment's metadata and do not load raw samples. `WithSegmentIndex` can reuse a sidecar of that layout on a later open; see [Segment index](#segment-index). `NewReader` accepts an `io.ReaderAt` that can report its length (`*os.File`, `*bytes.Reader`, `*io.SectionReader`, or any `io.Seeker`). `Values` and the typed helpers read through `ReadAt`, so concurrent reads are safe when the underlying reader is. `Cursor` scans sequentially through a 256 KiB buffer (`WithReadBuffer`).
 
 `Values` returns a freshly allocated slice in the channel's native Go type (`[]int32`, `[]float64`, `[]string`, `[]Timestamp`, `[]bool`, …). `Float64s` converts numeric channels. `Times` converts timestamp channels to UTC `time.Time` at nanosecond resolution. `Timestamps` keeps the full 2^-64 fraction.
 
@@ -156,6 +167,10 @@ t1, _ := wf.TimeAt(1) // 2024-06-01T12:00:00.001Z
 | `DataType` | NI `tdsDataType` codes. `String`, `Size`. |
 | `Property`, `Timestamp`, `Extended`, `LinearScale` | Values and conversions. |
 | `WithReadBuffer` | Sequential buffer for `Cursor` (default 256 KiB). `Values` stays on `ReadAt`. |
+| `Channel.ChunkStats` | Count, min, max, mean, and RMS per chunk of a numeric channel, one Cursor pass. |
+| `File.Status` | Clean end, or an incomplete final segment and any short tail. |
+| `Follow`, `WithTailInterval`, `WithTailBatch` | Poll a file that is still being written. Skip a segment whose lead-in is still the incomplete sentinel. |
+| `WithSegmentIndex`, `SegmentIndexPath` | Sidecar of the segment layout. Validated by size, modification time, identity, and a metadata fingerprint. |
 | `Error` and `Err*` | Wrapped errors. Use `errors.Is`. |
 
 Channel order inside a segment is creation order on the writer, which is the order objects first appear on the reader. `Write` does not reorder channels.
@@ -192,7 +207,10 @@ A channel that has never had a raw-data index has no type on disk (`DataType` is
 | DAQmx raw data (ToC bit `0x80`, index `0x1269`, `0x1369`, or `0x126A`) | error `ErrDAQmx` | not written |
 | Fixed-point `0x4F` | error `ErrUnsupported` | not written |
 | `*.tdms_index` (`TDSh`) | error `ErrIndexFile` | not written |
-| Incomplete last segment (`next` offset all `0xFF`) | yes, whole values that are present | sentinel used only until `Flush` patches it |
+| Incomplete last segment (`next` offset all `0xFF`) | yes, whole values that are present; `File.Status` reports it | sentinel used only until `Flush` patches it |
+| `Follow` of a file still being written | new samples from finished segments only | n/a |
+| Chunk min/max/mean/RMS | numeric channels, one pass, caller-chosen chunk | n/a |
+| Segment-index sidecar (`.gtdx`) | opt-in `WithSegmentIndex`; ignored when stale or corrupt | not written by the TDMS writer |
 | `name` property renaming an object (TDMS 2.0) | kept as a normal property; the path does not change | same |
 
 Integer and float type codes are the usual 1–10 (`int8` through `float64`). The NI article's lead-in example labels bytes `0E 00 00 00` as mask `0x1110`. That label is the binary value `0b1110`; the bytes are the mask `0x0E` (metadata, new object list, and raw data). ToC itself is always little-endian. When `TocBigEndian` is set, every other numeric field in the segment is big-endian, including the version and both offsets in the lead-in.
@@ -261,6 +279,28 @@ The numbers below are the median of three `-benchtime=1x` runs on one KVM virtua
 ## Layout of the package
 
 `format.go` is the lead-in. `datatype.go` is the type enum. `value.go` encodes properties and channel blocks. `reader.go` is the segment walk and `ReadAt` fetches. `writer.go` is segment assembly. Tests in `golden_test.go` build files with `encoding/binary` and the hex from the NI article, without calling `Writer`, so a bug shared by the writer and the reader cannot satisfy them.
+
+## Chunk statistics
+
+`Channel.ChunkStats(samplesPerChunk)` walks a numeric channel once and returns count, min, max, mean, and RMS for each chunk. The last chunk is shorter when the length is not a multiple of the size. The walk uses `Cursor` and does not retain earlier samples. Mean is the arithmetic mean. RMS is the square root of the mean of the squared samples. Values are accumulated as float64, with the same integer and extended-float conversion as `Float64s`. A NaN sample makes min, max, mean, and RMS NaN.
+
+String, boolean, timestamp, and complex channels return `ErrType`. The check is the channel's `DataType`. A boolean is not coerced to 0 and 1 here, and a channel is not numeric because of its name.
+
+## File status and follow
+
+`File.Status` reports whether the file ended on a finished segment or on the NI incomplete-segment sentinel (`0xFFFFFFFFFFFFFFFF` in the next-segment offset). `PartialTail` is set when that segment's raw bytes do not end on a chunk boundary. `UnusedTail` is the number of leftover raw bytes that were not a whole value. `Open` of a well-formed file is unchanged. `Open` of an incomplete file is also unchanged: `Values` still returns every whole value in the tail. A next-segment offset that runs past EOF, or a trailing fragment shorter than a lead-in, still makes `Open` return `ErrTruncated`. There is no `FileStatus` in that case.
+
+`Follow` is for a file another process is still writing. It polls at `WithTailInterval` (default 100 ms) and returns batches of at most `WithTailBatch` samples (default 4096). Samples come from segments whose next-segment offset is a real length and whose bytes are fully present. A segment that still carries the sentinel is skipped, including whole values already flushed into it. A missing file, or a read that returns `ErrTruncated` because a lead-in names a length past EOF, is treated as "not finished yet" and polled again. Any other error stops the tail. Cancel the context to stop; `Err` is that context error. `Close` unblocks `Next` and leaves `Err` nil. The channel is selected by group name and channel name. A channel named `Time` is returned in its stored type.
+
+## Segment index
+
+`WithSegmentIndex(sidecar)` stores the parsed segment layout beside the data file so a later open can skip decoding lead-ins, object paths, raw-data indexes, and properties. `SegmentIndexPath(path)` is `path + ".gtdx"`. The file is not an NI `*.tdms_index` (`TDSh`) companion. Raw samples are not stored. A cache hit still reads sample bytes from the TDMS file, so an in-place edit of raw samples is visible.
+
+The sidecar is little-endian, version 1, magic `GTDX` (72-byte header, then the object tree). The header holds the data file's size, modification time in Unix nanoseconds, device id and inode (0 when the platform does not report them), an IEEE CRC-32 of every lead-in followed by that segment's metadata, and an IEEE CRC-32 of the payload. Flags record an incomplete final segment and a partial tail. The payload is file properties, then groups, channels, and the spans `Values` uses to address samples. Properties use the ordinary TDMS property encoding.
+
+An open uses the sidecar only when every one of those checks matches the file it is about to read. A missing sidecar, a size or time or identity mismatch, a fingerprint mismatch, a bad payload checksum, an unknown version, or a truncated file is ignored. `Open` still returns the parsed file. After a full parse the sidecar is replaced by writing a temporary file in the same directory and renaming it over the sidecar. A failure of that write does not fail the open. Passing the data path itself as the sidecar is ignored, so the TDMS file is not overwritten. `File.SegmentIndexUsed` reports whether this open restored the layout from the sidecar.
+
+`dataset.WithSegmentIndex(true)` turns the same cache on for catalog and for later reads. The default is off.
 
 ## Datasets
 

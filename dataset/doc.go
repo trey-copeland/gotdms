@@ -99,6 +99,10 @@
 // points that lie inside a reported gap. dt is rounded to nanoseconds. A step
 // that rounds below 1ns returns ErrArgument instead of spinning.
 //
+// WithSegmentIndex opts catalog and reads into a tdms segment-index sidecar
+// per file (path plus ".gtdx"). The cache is validated by tdms and ignored
+// when it does not match the file. It is off unless the option is passed.
+//
 // Catalog and reads use a bounded worker pool (WithWorkers, WithReadWorkers).
 // ReadMany's pool is the whole call: it does not start another pool per
 // selector, so the worker count is also the cap on files open at once.

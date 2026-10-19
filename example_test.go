@@ -180,3 +180,49 @@ func Example_stream() {
 	// Output:
 	// [1 2 3 4]
 }
+
+func ExampleChannel_ChunkStats() {
+	buf := &bytes.Buffer{}
+	w, err := tdms.NewWriter(buf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	ch, err := w.Group("acq").Channel("ai0", tdms.TypeFloat64)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := ch.Write([]float64{1, 2, 3, 4}); err != nil {
+		fmt.Println(err)
+		return
+	}
+	if err := w.Close(); err != nil {
+		fmt.Println(err)
+		return
+	}
+	f, err := tdms.NewReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer f.Close()
+	g, _ := f.Group("acq")
+	c, _ := g.Channel("ai0")
+	cur, err := c.ChunkStats(2)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer cur.Close()
+	for cur.Next() {
+		st := cur.Stat()
+		fmt.Printf("%d %d %.1f %.1f %.1f\n", st.Index, st.Count, st.Min, st.Max, st.Mean)
+	}
+	if err := cur.Err(); err != nil {
+		fmt.Println(err)
+	}
+	// Output:
+	// 0 2 1.0 2.0 1.5
+	// 1 2 3.0 4.0 3.5
+}

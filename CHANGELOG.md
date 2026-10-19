@@ -6,6 +6,11 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
+- `cmd/gotdms` prints file structure (`info`, optionally `--json`) and writes channel samples as CSV (`convert`). The CSV has a header row. Timestamps are UTC RFC3339Nano because the channel type is a timestamp, not because of the channel name.
+- `Channel.ChunkStats` reports count, min, max, mean, and RMS for each chunk of a numeric channel in one Cursor pass. The caller chooses the chunk size in samples. String, boolean, timestamp, and complex channels return `ErrType`.
+- `File.Status` reports a clean end or an incomplete final segment (the NI `0xFFFFFFFFFFFFFFFF` next-segment offset), including a short tail. Reads of files that open are unchanged: whole values in that tail are still returned.
+- `Follow` polls a file that is still being written and yields new samples for one channel. Samples that belong to a segment whose lead-in is still the incomplete sentinel are not delivered. The context cancels the wait. `WithTailInterval` and `WithTailBatch` set the poll period and the batch size.
+- `WithSegmentIndex` restores segment layout from a sidecar when the file's size, modification time, device and inode (when the platform has them), and an IEEE CRC-32 of the lead-ins and metadata still match. Raw samples are not cached. A missing, stale, or corrupt sidecar is ignored and the file is parsed. The sidecar is replaced by a temporary file and `rename`. `SegmentIndexPath` is the conventional `path + ".gtdx"`. `dataset.WithSegmentIndex` opts the catalog and its reads into that cache.
 - `Writer.Stream`, `ChannelWriter.Stream`, and `ChannelWriter.StreamWaveform` write one segment whose sample counts are declared up front. Chunks are copied to the underlying writer as they arrive, so a large channel is not held until `Flush`. `Write` and `Flush` are unchanged.
 - String channels return `ErrUnsupported` from `Stream` (the offset table needs every length). A short or failed stream is left incomplete on a seekable writer and truncated on a non-seekable writer; it is not patched into a finished segment.
 

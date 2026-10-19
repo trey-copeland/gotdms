@@ -6,7 +6,12 @@ import (
 	"io"
 	"math"
 	"os"
+	"sync/atomic"
 )
+
+// segmentParses counts full segment-header walks. A sidecar hit does not
+// increment it. Tests use the delta to show a later open skipped parsing.
+var segmentParses atomic.Int64
 
 // File is an open TDMS file. It is safe for concurrent value reads when the
 // underlying io.ReaderAt is. Close it when finished.
@@ -23,6 +28,13 @@ type File struct {
 	groups []*Group
 	gindex map[string]int
 	byPath map[string]*Channel
+
+	// End-of-file state. An incomplete final segment still contributes every
+	// whole value it contains; these fields only describe that end.
+	incomplete  bool
+	partialTail bool
+	unusedTail  int64
+	indexUsed   bool
 }
 
 // Group is a named collection of channels.
@@ -86,21 +98,28 @@ type span struct {
 	partialPos    int64
 	partialCol    int64
 	partialStride int64
+
+	// live is set on every span that came from a final segment whose
+	// next-segment offset is the NI incomplete sentinel. Values, Slice, and
+	// Cursor still return those samples. Follow skips them until a later
+	// open sees a patched lead-in.
+	live bool
 }
 
-// Open opens the TDMS file at path.
-func Open(path string) (*File, error) {
+// Open opens the TDMS file at path. Optional ReaderOptions configure the
+// sequential buffer Cursor uses and, with WithSegmentIndex, a sidecar cache
+// of the segment layout. Values keeps using ReadAt and ignores that buffer.
+func Open(path string, opts ...ReaderOption) (*File, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, wrap("open", path, err)
 	}
-	tf, err := NewReader(f)
+	tf, err := newReader(f, path, opts...)
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
 	tf.closer = f
-	tf.path = path
 	return tf, nil
 }
 
@@ -110,10 +129,16 @@ func Open(path string) (*File, error) {
 // channel read. NewReader does not close r.
 //
 // Optional ReaderOptions configure the sequential buffer Cursor uses.
-// Values keeps using ReadAt and ignores that buffer.
+// Values keeps using ReadAt and ignores that buffer. WithSegmentIndex on a
+// NewReader applies when path was recorded by Open or r is an *os.File whose
+// Name is the data file; otherwise the sidecar is skipped and the file is parsed.
 func NewReader(r io.ReaderAt, opts ...ReaderOption) (*File, error) {
+	return newReader(r, "", opts...)
+}
+
+func newReader(r io.ReaderAt, path string, opts ...ReaderOption) (*File, error) {
 	if r == nil {
-		return nil, wrap("open", "", fmt.Errorf("%w: nil reader", ErrArgument))
+		return nil, wrap("open", path, fmt.Errorf("%w: nil reader", ErrArgument))
 	}
 	cfg := readerConfig{bufSize: DefaultReadBuffer}
 	for _, opt := range opts {
@@ -126,20 +151,28 @@ func NewReader(r io.ReaderAt, opts ...ReaderOption) (*File, error) {
 	}
 	sz, err := readerSize(r)
 	if err != nil {
-		return nil, wrap("open", "", err)
+		return nil, wrap("open", path, err)
 	}
 	if sz < 0 {
-		return nil, wrap("open", "", ErrCorrupt)
+		return nil, wrap("open", path, ErrCorrupt)
 	}
 	f := &File{
 		r:       r,
+		path:    path,
 		size:    sz,
 		readBuf: cfg.bufSize,
 		gindex:  map[string]int{},
 		byPath:  map[string]*Channel{},
 	}
+	if cfg.indexSidecar != "" && f.trySegmentIndex(cfg.indexSidecar) {
+		return f, nil
+	}
 	if err := f.parse(); err != nil {
 		return nil, err
+	}
+	if cfg.indexSidecar != "" {
+		// A cache write failure leaves the open valid. The next open parses.
+		_ = f.writeSegmentIndex(cfg.indexSidecar)
 	}
 	return f, nil
 }
@@ -531,6 +564,7 @@ func (c *Channel) readRangeFrom(r io.ReaderAt, start, n int, reuse any) (any, er
 }
 
 func (f *File) parse() error {
+	segmentParses.Add(1)
 	if f.size == 0 {
 		return wrap("read", f.path, ErrTruncated)
 	}
@@ -595,12 +629,13 @@ func (f *File) parse() error {
 				return wrapf("read", f.path, err, "segment at %d", pos)
 			}
 			interleaved := lead.toc&TocInterleavedData != 0
-			if err := f.addSpans(slots, dataPos, rawLen, interleaved, big, lead.next == incompleteSegment); err != nil {
+			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, lead.next == incompleteSegment); err != nil {
 				return wrapf("read", f.path, err, "segment at %d", pos)
 			}
 		}
 		f.segs++
 		if lead.next == incompleteSegment {
+			f.incomplete = true
 			break
 		}
 		pos = segEnd
@@ -899,16 +934,16 @@ type rawSlot struct {
 	total int64
 }
 
-func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big, incomplete bool) error {
+func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big, incomplete bool) (unused int64, err error) {
 	if len(slots) == 0 {
 		if rawLen != 0 {
-			return fmt.Errorf("%w: %d raw bytes but no channels", ErrCorrupt, rawLen)
+			return 0, fmt.Errorf("%w: %d raw bytes but no channels", ErrCorrupt, rawLen)
 		}
-		return nil
+		return 0, nil
 	}
-	interleaved, err := normalizeLayout(slots, interleaved)
+	interleaved, err = normalizeLayout(slots, interleaved)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	cols := make([]int64, len(slots))
 	sizes := make([]int64, len(slots))
@@ -916,35 +951,35 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 	var stride int64
 	for i, s := range slots {
 		if s.n > int64(math.MaxInt) {
-			return fmt.Errorf("%w: chunk has more values than int", ErrUnsupported)
+			return 0, fmt.Errorf("%w: chunk has more values than int", ErrUnsupported)
 		}
 		ds, sz, err := slotBytes(s)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		sizes[i] = ds
 		if interleaved {
 			cols[i] = stride
 			stride, err = add64(stride, int64(sz))
 			if err != nil {
-				return err
+				return 0, err
 			}
 		} else {
 			cols[i] = chunk
 		}
 		chunk, err = add64(chunk, ds)
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if chunk == 0 {
 		if rawLen != 0 {
-			return fmt.Errorf("%w: empty chunk size with %d raw bytes", ErrCorrupt, rawLen)
+			return 0, fmt.Errorf("%w: empty chunk size with %d raw bytes", ErrCorrupt, rawLen)
 		}
-		return nil
+		return 0, nil
 	}
 	if rawLen%chunk != 0 && !incomplete {
-		return fmt.Errorf("%w: raw length %d is not a multiple of chunk size %d", ErrCorrupt, rawLen, chunk)
+		return 0, fmt.Errorf("%w: raw length %d is not a multiple of chunk size %d", ErrCorrupt, rawLen, chunk)
 	}
 	nChunks := rawLen / chunk
 	rem := rawLen % chunk
@@ -953,13 +988,14 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 	if rem > 0 {
 		base, err := add64(dataPos, mustMul(nChunks, chunk))
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if interleaved {
 			if stride <= 0 {
-				return ErrCorrupt
+				return 0, ErrCorrupt
 			}
 			extra := rem / stride
+			unused = rem % stride
 			for i := range slots {
 				partialN[i] = extra
 				partialPos[i] = base
@@ -995,6 +1031,7 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 					break
 				}
 			}
+			unused = left
 		}
 	}
 	for i, s := range slots {
@@ -1010,6 +1047,7 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 			strSize:    sizes[i],
 			partialN:   partialN[i],
 			partialPos: partialPos[i],
+			live:       incomplete,
 		}
 		if sp.str {
 			// String blocks are contiguous per channel even when a single
@@ -1028,19 +1066,23 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 		}
 		full, err := mul64(nChunks, s.n)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		add, err := add64(full, partialN[i])
 		if err != nil {
-			return err
+			return 0, err
 		}
 		s.ch.total, err = add64(s.ch.total, add)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		s.ch.spans = append(s.ch.spans, sp)
 	}
-	return nil
+	if incomplete {
+		f.unusedTail = unused
+		f.partialTail = rem > 0
+	}
+	return unused, nil
 }
 
 func mustMul(a, b int64) int64 {

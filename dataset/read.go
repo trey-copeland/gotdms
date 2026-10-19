@@ -25,7 +25,7 @@ type piece struct {
 }
 
 func readOccurrence(o Occurrence, opt options, start, end time.Time, window bool) (piece, error) {
-	f, err := tdms.Open(o.File)
+	f, err := openTDMS(o.File, opt.segIndex)
 	if err != nil {
 		return piece{}, err
 	}
@@ -286,12 +286,13 @@ type readSlot struct {
 }
 
 type fileRead struct {
-	path    string
-	once    sync.Once
-	f       *tdms.File
-	err     error
-	clocks  map[string]*clockRead
-	pending int32
+	path     string
+	segIndex bool
+	once     sync.Once
+	f        *tdms.File
+	err      error
+	clocks   map[string]*clockRead
+	pending  int32
 }
 
 type clockRead struct {
@@ -336,7 +337,7 @@ func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.T
 			}
 			fr := files[o.File]
 			if fr == nil {
-				fr = &fileRead{path: o.File, clocks: map[string]*clockRead{}}
+				fr = &fileRead{path: o.File, segIndex: d.opt.segIndex, clocks: map[string]*clockRead{}}
 				files[o.File] = fr
 			}
 			if o.Source == TimeTimestamp {
@@ -409,7 +410,7 @@ func (it readItem) run(slots []readSlot, opt options, start, end time.Time) {
 
 func (fr *fileRead) open() {
 	fr.once.Do(func() {
-		fr.f, fr.err = tdms.Open(fr.path)
+		fr.f, fr.err = openTDMS(fr.path, fr.segIndex)
 	})
 }
 

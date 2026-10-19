@@ -353,6 +353,10 @@ func TestGoldenIncompleteSentinel(t *testing.T) {
 	ch, _ := f.Group("g")
 	c, _ := ch.Channel("c")
 	assertEqual(t, mustValues(t, c), []int32{1, 2})
+	st := f.Status()
+	if !st.Incomplete || st.Complete || !st.PartialTail || st.UnusedTail != 0 {
+		t.Fatalf("status %#v", st)
+	}
 }
 
 func TestGoldenVersion10(t *testing.T) {

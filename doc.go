@@ -28,6 +28,20 @@
 // batches and interleaved channels use a sequential buffer. Values and
 // Slice use ReadAt.
 //
+// Channel.ChunkStats reports count, min, max, mean, and RMS for each chunk of
+// a numeric channel. The caller chooses the chunk size in samples. The walk
+// uses Cursor and does not retain earlier chunks. String, boolean, timestamp,
+// and complex channels return ErrType.
+//
+// File.Status reports whether the file ended on a finished segment or on the
+// NI incomplete-segment sentinel. Reads of a file that opens are unchanged:
+// whole values in an incomplete tail are still returned. Follow polls a file
+// that is still being written and yields samples only from segments whose
+// next-segment offset is a real length. WithSegmentIndex reuses a sidecar of
+// the segment layout when the file's size, modification time, identity, and
+// a fingerprint of the lead-ins and metadata still match. A missing, stale,
+// or corrupt sidecar is ignored.
+//
 // # Writing
 //
 // Create or NewWriter buffers one segment at a time. Flush emits that segment.

@@ -235,6 +235,7 @@ type options struct {
 	tsName      string
 	tsNameSet   bool
 	ts          map[string]string
+	segIndex    bool
 }
 
 type clockMode int
@@ -314,6 +315,18 @@ func WithTimestampChannelName(name string) Option {
 	return func(o *options) {
 		o.tsName = name
 		o.tsNameSet = true
+	}
+}
+
+// WithSegmentIndex enables a sidecar segment index for every file this
+// dataset opens. The sidecar path is tdms.SegmentIndexPath, the data file
+// path plus ".gtdx". Catalog and later reads share that cache. A missing,
+// stale, or corrupt sidecar is ignored and the file is parsed; opening the
+// dataset still succeeds. The default is off. See tdms.WithSegmentIndex for
+// the format and the invalidation rules.
+func WithSegmentIndex(enabled bool) Option {
+	return func(o *options) {
+		o.segIndex = enabled
 	}
 }
 
@@ -752,8 +765,15 @@ func run(workers, n int, fn func(i int)) {
 	wg.Wait()
 }
 
+func openTDMS(path string, segIndex bool) (*tdms.File, error) {
+	if !segIndex {
+		return tdms.Open(path)
+	}
+	return tdms.Open(path, tdms.WithSegmentIndex(tdms.SegmentIndexPath(path)))
+}
+
 func indexFile(path string, opt options) ([]Occurrence, error) {
-	f, err := tdms.Open(path)
+	f, err := openTDMS(path, opt.segIndex)
 	if err != nil {
 		return nil, err
 	}
