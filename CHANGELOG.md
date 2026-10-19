@@ -12,6 +12,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ### Added
 
+- Nightly mutation testing of the core package with Gremlins v0.6.0 (Apache-2.0). `.github/workflows/run-mutation-testing.yml` (`Run mutation testing on the core package`) runs at 06:00 UTC and on `workflow_dispatch`. It does not run on pull requests. A survived mutant does not fail the job. The JSON report is uploaded as an artifact. How to run it locally is in [docs/mutation-testing.md](docs/mutation-testing.md). Gremlins is not a module dependency.
 - `WithLenientTail` opens a file whose final segment declares a finite next-segment offset past EOF. Earlier segments are kept, and whole values that fit in the partial tail are readable. `File.Status.Truncated` reports that recovery. `PartialTail` and `UnusedTail` describe the tail the same way they describe an incomplete sentinel. The default `Open` still returns `ErrTruncated`. A short trailing lead-in, or metadata that itself runs past EOF, is still `ErrTruncated`.
 - `Follow` opens with `WithLenientTail`. Samples in that past-EOF tail are not committed, so `Next` delivers earlier finished segments and waits for the declared length.
 - `cmd/gotdms convert` writes `#N/A` when a channel has no sample on that row. A present empty string stays an empty field. A string value that is itself `#N/A` looks the same.

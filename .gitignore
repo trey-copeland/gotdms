@@ -1,3 +1,4 @@
 *.tdms
 *.tdms_index
 agent-tools/
+gremlins-report.json

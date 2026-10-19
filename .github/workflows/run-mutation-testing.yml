@@ -1,0 +1,82 @@
+# Nightly mutation test of the core package (the module root).
+# This does not run on pull requests. .github/workflows/build-and-test-go-module.yml
+# is the pull-request gate. A survived mutant is reported; it does not fail this job.
+# Gremlins is a CI tool only. It is not a dependency of the gotdms module.
+
+name: 'Run mutation testing on the core package'
+
+on:
+  schedule:
+    # 06:00 UTC every day.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: run-mutation-testing
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    name: gremlins (core package)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Gremlins v0.6.0
+        # Manual install from https://gremlins.dev/0.6/install/ (Linux tarball).
+        # Pinned to v0.6.0. Do not use @latest. Apache-2.0.
+        # v0.6.0's go.mod says `go 1.25`, so `go install` needs a newer
+        # toolchain than this module. The release binary runs the tests
+        # with the Go from go.mod. The checksum is the linux/amd64 line
+        # of that release's checksums.txt.
+        run: |
+          set -euo pipefail
+          version=0.6.0
+          archive="gremlins_${version}_linux_amd64.tar.gz"
+          url="https://github.com/go-gremlins/gremlins/releases/download/v${version}/${archive}"
+          curl -fsSL -o "$archive" "$url"
+          echo "b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538  ${archive}" | sha256sum -c
+          tar -xzf "$archive" gremlins
+          dest="${RUNNER_TEMP}/gremlins-bin"
+          mkdir -p "$dest"
+          mv gremlins "$dest/gremlins"
+          chmod 755 "$dest/gremlins"
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/gremlins" --version
+      - name: Unleash on the core package
+        # --timeout-coefficient 4 kills a mutant that runs longer than
+        # 4× the coverage run, so one hang cannot stall the job.
+        # --threshold-efficacy 0 and --threshold-mcover 0 are the Gremlins
+        # defaults: do not exit 10 or 11 when efficacy or mutant coverage
+        # is low. LIVED, NOT COVERED, and TIMED OUT stay in this log and
+        # in gremlins-report.json. A coverage failure or a Gremlins crash
+        # still fails this step. continue-on-error is not set, because
+        # that would also hide those failures.
+        # dataset/, cmd/, and examples/ are other packages.
+        run: |
+          gremlins unleash \
+            --exclude-files '^dataset/' \
+            --exclude-files '^cmd/' \
+            --exclude-files '^examples/' \
+            --workers 4 \
+            --test-cpu 1 \
+            --timeout-coefficient 4 \
+            --threshold-efficacy 0 \
+            --threshold-mcover 0 \
+            --output gremlins-report.json \
+            --output-statuses lct
+      - name: Upload Gremlins report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gremlins-report
+          path: gremlins-report.json
+          if-no-files-found: warn

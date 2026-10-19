@@ -355,6 +355,10 @@ for _, s := range series {
 
 The Python and Polars package is [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python). It is not on PyPI yet.
 
+## Mutation testing
+
+A nightly [Gremlins](https://github.com/go-gremlins/gremlins) run checks the core package. It is a quality report, not a pull-request gate. The pinned command and how to read a survivor are in [docs/mutation-testing.md](docs/mutation-testing.md).
+
 ## Releasing
 
 Nothing is tagged or published yet. The proposed first module tag is `v0.1.0`. The notes are in [CHANGELOG.md](CHANGELOG.md). The tag checklist is in [docs/releasing.md](docs/releasing.md). A tag of this module does not publish the Python package.
