@@ -222,21 +222,17 @@ func TestReadManyClosesOnOpenError(t *testing.T) {
 	if err := os.WriteFile(paths[2], []byte("not a tdms file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	before := countFDs(t)
+	before, counted := fdCount(t)
 	_, err := ds.ReadMany([]Selector{{Name: "ai0", Group: "acq"}, {Name: "ai1", Group: "acq"}}, epoch, epoch.Add(100*time.Second))
 	if err == nil {
 		t.Fatal("expected open error")
 	}
-	if after := countFDs(t); after > before {
-		t.Fatalf("fds before %d after %d", before, after)
-	}
-	before = countFDs(t)
+	assertNoFDLeak(t, "ReadMany", paths, before, counted)
+	before, counted = fdCount(t)
 	if _, err := ds.Read(Selector{Name: "ai0", Group: "acq"}); err == nil {
 		t.Fatal("expected read error")
 	}
-	if after := countFDs(t); after > before {
-		t.Fatalf("read fds before %d after %d", before, after)
-	}
+	assertNoFDLeak(t, "Read", paths, before, counted)
 }
 
 func TestSeriesOwnsBuffers(t *testing.T) {
@@ -412,20 +408,6 @@ func TestResampleStepAndAllocs(t *testing.T) {
 	if allocs != 3 {
 		t.Fatalf("allocs = %v, want 3", allocs)
 	}
-}
-
-func countFDs(t *testing.T) int {
-	t.Helper()
-	f, err := os.Open("/proc/self/fd")
-	if err != nil {
-		t.Fatal(err)
-	}
-	names, err := f.Readdirnames(-1)
-	f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return len(names)
 }
 
 func sameTimes(got, want []time.Time) bool {
