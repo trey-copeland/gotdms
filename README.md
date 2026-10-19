@@ -255,6 +255,8 @@ Interleaved fixed-size channels are split out in about 1 MiB windows rather than
 
 There is no mmap switch. The defaults above are the fast path; the options only change buffer size.
 
+`BenchmarkChunkStatsFloat64` walks 1,048,576 `float64` samples (8 MiB) in chunks of 4096. On this cloud VM (Linux amd64, 4 vCPU, Intel Xeon, Go 1.22, synthetic data, median of three `-benchmem` runs) it was about 3024 MB/s, 32984 B/op, and 4 allocs/op. That is one 32 KiB chunk plus a few small headers, not a copy of the channel.
+
 `BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `BenchmarkLargeReadFloat64`, `BenchmarkLargeReadFloat64File`, `BenchmarkLargeCursorFile`, `BenchmarkLargeInterleaved`, `BenchmarkLargeWriteFile`, and `BenchmarkLargeWriteMem` move 128 MiB (four float64 channels for the interleaved case). `BenchmarkLargeStreamFile` writes that 128 MiB through `Stream` in 64 KiB chunks. `BenchmarkLargeWriteDiscard` and `BenchmarkLargeStreamDiscard` allocate the samples inside the timed loop and discard the bytes, so `B/op` is the writer's footprint. They run only under `-bench`.
 
 On this VM (Linux amd64, 4 vCPU, Go 1.22, `benchtime=300ms`), `BenchmarkLargeWriteFile` was 2223 MB/s and 1.00 MiB/op. `BenchmarkLargeStreamFile` was 3418 MB/s and 1.05 MiB/op. The stream reports about 2100 allocs/op: one small interface header per 64 KiB chunk, not a copy of the chunk and not a metadata rebuild. `BenchmarkLargeWriteDiscard` was 129 MiB/op (the 128 MiB slice allocated for that call and retained until `Close`). `BenchmarkLargeStreamDiscard` was 1.11 MiB/op (one 64 KiB chunk plus the 1 MiB write buffer).

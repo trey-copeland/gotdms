@@ -120,7 +120,7 @@ func TestInfoAndConvert(t *testing.T) {
 		t.Fatalf("convert: %d %s", code, stderr.String())
 	}
 	wantCSV := strings.Join([]string{
-		"/'acquisition'/'temperature','/'acquisition'/'Time','/'acquisition'/'label','/'acquisition'/'stamp'",
+		"/'acquisition'/'temperature',/'acquisition'/'Time',/'acquisition'/'label',/'acquisition'/'stamp'",
 		"21.5,1.25,a," + when.Format(time.RFC3339Nano),
 		"22,,\"b,c\",",
 		"",
