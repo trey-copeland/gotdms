@@ -281,6 +281,10 @@ for _, s := range series {
 
 `bridge/` is a self-contained Go module and Python client so a numpy and Polars tool can stop importing npTDMS. The bridge links Apache Arrow. The core module stays dependency-free. Interactive sessions and `gotdms-bridge convert` both return raw samples unless scaling is requested. Polars frames use a `time` column, because Polars has no row index. The mapping, the license note, and the remaining gaps are in [bridge/docs/nptdms-migration.md](bridge/docs/nptdms-migration.md). That directory is structured to be lifted out as its own repository.
 
+## Releasing
+
+Nothing is tagged or published yet. The proposed first module tag is `v0.1.0`, and the notes in [CHANGELOG.md](CHANGELOG.md) describe this tree: the reader and writer, waveforms and range reads, the dataset package, CI, and the in-tree `bridge/` module. The tag checklist is in [docs/releasing.md](docs/releasing.md). Pushing a `v*` tag does not publish the Python package.
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The core module has no third-party Go dependencies.

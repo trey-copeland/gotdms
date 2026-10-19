@@ -1,0 +1,54 @@
+# Tag-triggered GitHub Release for the Go module.
+# This file does nothing until it is on main and a v* tag is pushed.
+# It does not build binaries, it does not publish to PyPI, and it does not
+# call the module proxy. The proxy fetches the tag from GitHub on its own.
+# .github/workflows/ci.yml is the pull-request CI. This workflow does not
+# duplicate it.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: test and create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: race
+        run: go test -race .
+      - name: race dataset
+        run: go test -race ./dataset/
+      # bridge/ is its own module, so the root go test does not enter it.
+      # The tagged tree still contains it.
+      - name: bridge module
+        working-directory: bridge
+        run: |
+          go vet ./...
+          go test ./...
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
