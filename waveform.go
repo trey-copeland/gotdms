@@ -384,6 +384,8 @@ func expandScaled(dt DataType, b []byte, y []float64, scale LinearScale) {
 // dt 0 is representable. Y is written raw; a LinearScale is not inverted.
 //
 // wf must be a Waveform[T] for a numeric T, and the channel type must match T.
+// WriteWaveform buffers Y until Flush. StreamWaveform declares the count and
+// writes Y in chunks.
 func (c *ChannelWriter) WriteWaveform(wf any) error {
 	if c == nil || c.w == nil {
 		return wrap("write", "", fmt.Errorf("%w: nil channel", ErrArgument))

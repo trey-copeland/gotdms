@@ -43,6 +43,12 @@
 // value kinds are copied at Write. Flush streams that buffer and does not
 // allocate a second full copy.
 //
+// Stream declares each channel's value count, writes the segment header, and
+// copies later chunks straight to the underlying writer. Memory stays within
+// the write buffer plus the chunk being written. String channels stay on
+// Write: the offset table needs every length first. Finish patches a seekable
+// lead-in. A short stream is not patched into a finished segment.
+//
 // Files are little-endian, version 4713 (TDMS 2.0). Big-endian segments are
 // accepted on read. DAQmx raw data is detected and rejected with ErrDAQmx
 // rather than decoded.

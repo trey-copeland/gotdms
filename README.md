@@ -60,6 +60,19 @@ return ch.Write([]float64{22.4, 22.8})
 
 `bytes.Buffer` and other non-seekable writers write the lead-in with the finished length, then stream the raw bytes. A seekable writer (`*os.File`) publishes the NI incomplete-segment sentinel (`0xFFFFFFFFFFFFFFFF`) in the next-segment offset, then patches the real length after the raw bytes are on disk. A crash in between leaves a last segment the reader can consume up to EOF. Output goes through a 1 MiB buffer (`WithWriteBuffer`). Samples passed to `Write` stay in the channel buffer until `Flush`; flush does not allocate a second copy of a contiguous segment.
 
+`Stream` is the path that does not hold a large channel until `Flush`. The caller declares how many values each channel will receive. The writer emits the lead-in and the raw-data index immediately, then each `Stream.Write` copies that chunk to the underlying writer. Resident memory is the write buffer plus the chunk in hand, not the total number of samples. `Finish` (or `Close`, when every declared value has been written) patches a seekable lead-in. String channels are not streamed: their offset table needs every string length, so they stay on `Write`. A stream that stops short is not closed out as a finished segment. On a seekable file the lead-in stays the incomplete-segment sentinel and the reader keeps the whole values that were written. On a non-seekable writer the lead-in already names the full length, so the short file returns `ErrTruncated`.
+
+```go
+ch, err := w.Group("acquisition").Channel("temperature", tdms.TypeFloat64)
+s, err := ch.Stream(1_000_000) // total values, not the chunk size
+for more {
+    err = s.Write(ch, chunk) // chunk may be reused after Write returns
+}
+err = s.Finish()
+```
+
+Contiguous channels in one stream are written in creation order, each count finished before the next channel starts. Interleaved channels must share one count; `WriteInterleaved` takes one equal-length slice per channel and mixes that chunk immediately. `SetProperty` during an open stream returns an error, because the segment metadata is already written. `WriteWaveform` still buffers Y. `StreamWaveform` sets the waveform properties and the declared count, then Y is written with `Stream.Write`.
+
 `SetInterleaved(true)` multiplexes fixed-size channels sample by sample. Every channel in that chunk must have the same number of values. See the matrix below for strings.
 
 ## Read
@@ -135,8 +148,9 @@ t1, _ := wf.TimeAt(1) // 2024-06-01T12:00:00.001Z
 | --- | --- |
 | `Open`, `NewReader`, `File` | Read a file. `Groups`, `Group`, `Properties` at file level. `Version`, `SegmentCount`. |
 | `Group`, `Channel` | Names, paths, properties, `Values`, `Cursor`, typed helpers, `Waveform`, `WaveformHeader`. |
-| `Create`, `NewWriter`, `Writer` | `SetProperty`, `Group`, `SetInterleaved`, `Flush`, `Close`. `WithWriteBuffer` (default 1 MiB). |
-| `GroupWriter`, `ChannelWriter` | `SetProperty`, `Channel`, `Write`, `WriteWaveform`. |
+| `Create`, `NewWriter`, `Writer` | `SetProperty`, `Group`, `SetInterleaved`, `Flush`, `Close`, `Stream`. `WithWriteBuffer` (default 1 MiB). |
+| `GroupWriter`, `ChannelWriter` | `SetProperty`, `Channel`, `Write`, `WriteWaveform`, `Stream`, `StreamWaveform`. |
+| `Stream` | Declared-count segment. `Write`, `WriteInterleaved`, `Finish`. |
 | `Waveform[T]`, `ReadWaveform`, `ScaledWaveform` | Analog waveform. `ApplyScale` applies a `LinearScale` explicitly. |
 | `WaveformHeader` | t0, dt, unit, and `wf_samples` without loading Y. `TimeAt` timestamps cursor batches. |
 | `DataType` | NI `tdsDataType` codes. `String`, `Size`. |
@@ -158,7 +172,9 @@ A channel that has never had a raw-data index has no type on disk (`DataType` is
 | Big-endian segments | yes | no |
 | Interleaved fixed-size channels, including mixed widths | yes | yes, equal lengths |
 | Contiguous channels, including unequal lengths | yes | yes |
-| Several chunks in one segment | yes | one chunk per `Flush` |
+| Several chunks in one segment | yes | one chunk per `Flush`; `Stream` is one declared-count chunk, fed in pieces |
+| `Stream` of fixed-size channels, counts known up front | n/a | yes, seekable or not; memory follows the write buffer and the current chunk |
+| `Stream` of string channels | n/a | error `ErrUnsupported` (offset table). Use `Write` |
 | Segments with no metadata (repeated layout) | yes | yes |
 | `kTocNewObjList` clear (append a channel, keep order) | yes | yes |
 | `kTocNewObjList` set (channel removed or reordered) | yes | yes |
@@ -221,7 +237,9 @@ Interleaved fixed-size channels are split out in about 1 MiB windows rather than
 
 There is no mmap switch. The defaults above are the fast path; the options only change buffer size.
 
-`BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `BenchmarkLargeReadFloat64`, `BenchmarkLargeReadFloat64File`, `BenchmarkLargeCursorFile`, `BenchmarkLargeInterleaved`, `BenchmarkLargeWriteFile`, and `BenchmarkLargeWriteMem` move 128 MiB (four float64 channels for the interleaved case). They run only under `-bench`.
+`BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `BenchmarkLargeReadFloat64`, `BenchmarkLargeReadFloat64File`, `BenchmarkLargeCursorFile`, `BenchmarkLargeInterleaved`, `BenchmarkLargeWriteFile`, and `BenchmarkLargeWriteMem` move 128 MiB (four float64 channels for the interleaved case). `BenchmarkLargeStreamFile` writes that 128 MiB through `Stream` in 64 KiB chunks. `BenchmarkLargeWriteDiscard` and `BenchmarkLargeStreamDiscard` allocate the samples inside the timed loop and discard the bytes, so `B/op` is the writer's footprint. They run only under `-bench`.
+
+On this VM (Linux amd64, 4 vCPU, Go 1.22, `benchtime=300ms`), `BenchmarkLargeWriteFile` was 2223 MB/s and 1.00 MiB/op. `BenchmarkLargeStreamFile` was 3418 MB/s and 1.05 MiB/op. The stream reports about 2100 allocs/op: one small interface header per 64 KiB chunk, not a copy of the chunk and not a metadata rebuild. `BenchmarkLargeWriteDiscard` was 129 MiB/op (the 128 MiB slice allocated for that call and retained until `Close`). `BenchmarkLargeStreamDiscard` was 1.11 MiB/op (one 64 KiB chunk plus the 1 MiB write buffer).
 
 ```bash
 go test -bench=BenchmarkLarge -benchmem -count=3

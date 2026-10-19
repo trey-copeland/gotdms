@@ -44,9 +44,9 @@ var metaReuse = true
 // Flush streams the channel buffer through a large bufio.Writer (see
 // WithWriteBuffer). It does not allocate a second copy of a contiguous
 // segment. Interleaved output is mixed in windows of about 1 MiB. The
-// samples for a segment stay reachable until Flush returns. Streaming a
-// segment to disk while Write is still being called would need a different
-// API; call Flush per segment instead of buffering the whole file.
+// samples for a segment stay reachable until Flush returns. Stream writes
+// a segment whose sample counts are declared up front, so those bytes can
+// reach the underlying writer before Finish.
 //
 // Segments are little-endian version 4713. SetInterleaved selects the layout
 // of later flushes. The writer is not safe for concurrent use.
@@ -63,6 +63,8 @@ type Writer struct {
 	interleaved bool
 	closed      bool
 	started     bool
+	stream      *Stream
+	sticky      error
 
 	metaValid bool
 	metaIn    metaInput
@@ -186,12 +188,29 @@ func NewWriter(w io.Writer, opts ...WriterOption) (*Writer, error) {
 // return ErrLayout.
 func (w *Writer) SetInterleaved(on bool) { w.interleaved = on }
 
+// busy reports whether a buffered write or flush may proceed.
+func (w *Writer) busy() error {
+	if w == nil {
+		return fmt.Errorf("%w: nil writer", ErrArgument)
+	}
+	if w.closed {
+		return ErrClosed
+	}
+	if w.sticky != nil {
+		return w.sticky
+	}
+	if w.stream != nil {
+		return fmt.Errorf("%w: finish the open stream first", ErrArgument)
+	}
+	return nil
+}
+
 // SetProperty sets a file-level property. Integers that fit in int32 are
 // stored as int32; larger ints are int64. time.Time is stored as a TDMS
 // timestamp. The value is written on the next flush that emits metadata.
 func (w *Writer) SetProperty(name string, value any) error {
-	if w.closed {
-		return wrap("write", "/", ErrClosed)
+	if err := w.busy(); err != nil {
+		return wrap("write", "/", err)
 	}
 	return w.root.set(name, value)
 }
@@ -216,8 +235,8 @@ func (g *GroupWriter) Name() string { return g.g.name }
 
 // SetProperty sets a group property.
 func (g *GroupWriter) SetProperty(name string, value any) error {
-	if g.w.closed {
-		return wrap("write", g.g.obj.path, ErrClosed)
+	if err := g.w.busy(); err != nil {
+		return wrap("write", g.g.obj.path, err)
 	}
 	return g.g.obj.set(name, value)
 }
@@ -225,8 +244,8 @@ func (g *GroupWriter) SetProperty(name string, value any) error {
 // Channel returns the channel, creating it on first use. A second call with
 // a different data type returns ErrType.
 func (g *GroupWriter) Channel(name string, dt DataType) (*ChannelWriter, error) {
-	if g.w.closed {
-		return nil, wrap("write", channelPath(g.g.name, name), ErrClosed)
+	if err := g.w.busy(); err != nil {
+		return nil, wrap("write", channelPath(g.g.name, name), err)
 	}
 	if dt != TypeString && dt != TypeVoid {
 		if _, ok := dt.Size(); !ok || dt == TypeFixedPoint || dt == TypeDAQmxRaw {
@@ -259,8 +278,8 @@ func (c *ChannelWriter) DataType() DataType { return c.ch.dt }
 
 // SetProperty sets a channel property.
 func (c *ChannelWriter) SetProperty(name string, value any) error {
-	if c.w.closed {
-		return wrap("write", c.ch.path, ErrClosed)
+	if err := c.w.busy(); err != nil {
+		return wrap("write", c.ch.path, err)
 	}
 	return c.ch.obj.set(name, value)
 }
@@ -277,8 +296,8 @@ func (c *ChannelWriter) SetProperty(name string, value any) error {
 // segment. Bool, timestamp, and extended values are copied at Write. String
 // headers are copied. A big-endian host copies numeric slices at Write.
 func (c *ChannelWriter) Write(values any) error {
-	if c.w.closed {
-		return wrap("write", c.ch.path, ErrClosed)
+	if err := c.w.busy(); err != nil {
+		return wrap("write", c.ch.path, err)
 	}
 	if view, n, ok := borrowedView(c.ch.dt, values); ok {
 		c.ch.retainView(view, n)
@@ -329,8 +348,8 @@ func (ch *wChannel) retainView(view []byte, n int) {
 // Flush writes the current segment. It is a no-op when nothing has changed
 // and a segment has already been written.
 func (w *Writer) Flush() error {
-	if w.closed {
-		return wrap("flush", w.path, ErrClosed)
+	if err := w.busy(); err != nil {
+		return wrap("flush", w.path, err)
 	}
 	data := w.dataChannels()
 	if len(data) == 0 && !w.pendingMeta() {
@@ -378,8 +397,16 @@ func (w *Writer) Close() error {
 	if w.closed {
 		return nil
 	}
-	err := w.Flush()
+	var err error
+	if w.stream != nil {
+		err = w.stream.shutdown()
+	} else if w.sticky != nil {
+		err = w.sticky
+	} else {
+		err = w.Flush()
+	}
 	w.closed = true
+	w.stream = nil
 	if w.own != nil {
 		if cerr := w.own.Close(); err == nil {
 			err = cerr

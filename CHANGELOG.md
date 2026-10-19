@@ -6,7 +6,8 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
-Release-prep documents only. No library behavior change.
+- `Writer.Stream`, `ChannelWriter.Stream`, and `ChannelWriter.StreamWaveform` write one segment whose sample counts are declared up front. Chunks are copied to the underlying writer as they arrive, so a large channel is not held until `Flush`. `Write` and `Flush` are unchanged.
+- String channels return `ErrUnsupported` from `Stream` (the offset table needs every length). A short or failed stream is left incomplete on a seekable writer and truncated on a non-seekable writer; it is not patched into a finished segment.
 
 ## 0.1.0 (proposed, not tagged)
 

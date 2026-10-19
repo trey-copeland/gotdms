@@ -135,3 +135,48 @@ func ExampleReadWaveform() {
 	// t1: 2024-06-01T12:00:00.001Z
 	// wf_samples: 3
 }
+
+func Example_stream() {
+	buf := &bytes.Buffer{}
+	w, err := tdms.NewWriter(buf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	ch, err := w.Group("acq").Channel("ai0", tdms.TypeFloat64)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	s, err := ch.Stream(4)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	for _, chunk := range [][]float64{{1, 2}, {3, 4}} {
+		if err := s.Write(ch, chunk); err != nil {
+			fmt.Println(err)
+			return
+		}
+	}
+	if err := w.Close(); err != nil {
+		fmt.Println(err)
+		return
+	}
+	f, err := tdms.NewReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer f.Close()
+	g, _ := f.Group("acq")
+	c, _ := g.Channel("ai0")
+	values, err := c.Float64s()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(values)
+	// Output:
+	// [1 2 3 4]
+}

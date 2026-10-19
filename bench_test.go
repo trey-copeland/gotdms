@@ -714,6 +714,106 @@ func BenchmarkCursorFloat64sAlias(b *testing.B) {
 	}
 }
 
+func BenchmarkLargeStreamFile(b *testing.B) {
+	const n = 1 << 24
+	const chunk = 8192 // 64 KiB
+	data := benchFloats(chunk)
+	b.SetBytes(int64(n) * 8)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		f, err := os.CreateTemp("", "tdms-s-*.tdms")
+		if err != nil {
+			b.Fatal(err)
+		}
+		name := f.Name()
+		w, err := NewWriter(f)
+		if err != nil {
+			b.Fatal(err)
+		}
+		ch, err := w.Group("g").Channel("c", TypeFloat64)
+		if err != nil {
+			b.Fatal(err)
+		}
+		s, err := ch.Stream(n)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for written := 0; written < n; written += chunk {
+			if err := s.Write(ch, data); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			b.Fatal(err)
+		}
+		os.Remove(name)
+	}
+}
+
+// BenchmarkLargeWriteDiscard and BenchmarkLargeStreamDiscard allocate the
+// samples inside the timed loop and discard the file bytes, so B/op is the
+// writer's footprint. The buffered call allocates the whole channel. The
+// stream allocates one chunk plus the write buffer.
+func BenchmarkLargeWriteDiscard(b *testing.B) {
+	const n = 1 << 24
+	b.SetBytes(int64(n) * 8)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		data := make([]float64, n)
+		w, err := NewWriter(nopWriter{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		ch, err := w.Group("g").Channel("c", TypeFloat64)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := ch.Write(data); err != nil {
+			b.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkLargeStreamDiscard(b *testing.B) {
+	const n = 1 << 24
+	const chunk = 8192
+	b.SetBytes(int64(n) * 8)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		data := make([]float64, chunk)
+		w, err := NewWriter(nopWriter{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		ch, err := w.Group("g").Channel("c", TypeFloat64)
+		if err != nil {
+			b.Fatal(err)
+		}
+		s, err := ch.Stream(n)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for written := 0; written < n; written += chunk {
+			if err := s.Write(ch, data); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+type nopWriter struct{}
+
+func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
 func BenchmarkRepeatFlush(b *testing.B) { benchRepeatFlush(b, true) }
 
 func BenchmarkRepeatFlushRebuild(b *testing.B) { benchRepeatFlush(b, false) }
