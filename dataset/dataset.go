@@ -826,14 +826,13 @@ var spanDeclaredCalls atomic.Uint64
 
 // spanDeclared reports the catalog span of a declared clock.
 //
-// A positive first step does not decode the channel. The core reader has no
-// range read, so the last sample cannot be fetched without the prefix. Last
-// is derived from the first two samples and the length: it equals the last
-// sample when the stored axis is a uniform arithmetic sequence. Monotonicity
-// is not proved here. Read, ReadWindow, and ReadMany decode the axis and
-// return ErrMonotonic on a backwards step. Dt is that first step, which is
-// what uniformDt returns for a uniform axis; a later irregular step is caught
-// when the axis is decoded, and Series.Dt is then 0.
+// A positive first step reads the first two samples with Slice and does not
+// decode the rest. Last is derived from those samples and the length: it
+// equals the last sample when the stored axis is a uniform arithmetic
+// sequence. Monotonicity is not proved here. Read, ReadWindow, and ReadMany
+// decode the axis and return ErrMonotonic on a backwards step. Dt is that
+// first step, which is what uniformDt returns for a uniform axis; a later
+// irregular step is caught when the axis is decoded, and Series.Dt is then 0.
 //
 // A first step that is not positive cannot be extrapolated. Those clocks are
 // scanned in full so Start/Last stay the true min/max.
@@ -954,8 +953,12 @@ func spanTimestampScan(ch *tdms.Channel) (start, last time.Time, dt float64, has
 	return acc.start, acc.last, acc.dt, acc.hasDt, true, nil
 }
 
-// headFloats copies the first n numeric samples out of a cursor batch.
-// The batch is not kept: Cursor may reuse it on the next Next.
+// headFloats reads the first n numeric samples with Slice.
+//
+// Cursor(n) for a short n does not take the direct ReadAt path (that starts
+// at 32 KiB). It allocates the sequential read buffer, DefaultReadBuffer,
+// which is 256 KiB. Catalog only needs two samples, so that buffer dominated
+// Open of a shared clock.
 func headFloats(ch *tdms.Channel, n int) ([]float64, error) {
 	if n <= 0 {
 		return nil, nil
@@ -963,21 +966,13 @@ func headFloats(ch *tdms.Channel, n int) ([]float64, error) {
 	if n > ch.Len() {
 		n = ch.Len()
 	}
-	cur := ch.Cursor(n)
-	out := make([]float64, 0, n)
-	for cur.Next() && len(out) < n {
-		batch, err := cur.Float64s()
-		if err != nil {
-			return nil, err
-		}
-		need := n - len(out)
-		if len(batch) > need {
-			batch = batch[:need]
-		}
-		out = append(out, batch...)
-	}
-	if err := cur.Err(); err != nil {
+	v, err := ch.Slice(0, n)
+	if err != nil {
 		return nil, err
+	}
+	out, err := sliceToFloats(v)
+	if err != nil {
+		return nil, fmt.Errorf("channel %q: %w", ch.Name(), err)
 	}
 	if len(out) != n {
 		return nil, fmt.Errorf("%w: channel %q: read %d of %d timestamp samples", ErrArgument, ch.Name(), len(out), n)
@@ -992,26 +987,63 @@ func headTimestamps(ch *tdms.Channel, n int) ([]tdms.Timestamp, error) {
 	if n > ch.Len() {
 		n = ch.Len()
 	}
-	cur := ch.Cursor(n)
-	out := make([]tdms.Timestamp, 0, n)
-	for cur.Next() && len(out) < n {
-		batch, ok := cur.Values().([]tdms.Timestamp)
-		if !ok || batch == nil {
-			return nil, fmt.Errorf("%w: channel %q is not a timestamp axis", ErrUntimed, ch.Name())
-		}
-		need := n - len(out)
-		if len(batch) > need {
-			batch = batch[:need]
-		}
-		out = append(out, batch...)
-	}
-	if err := cur.Err(); err != nil {
+	v, err := ch.Slice(0, n)
+	if err != nil {
 		return nil, err
 	}
-	if len(out) != n {
-		return nil, fmt.Errorf("%w: channel %q: read %d of %d timestamp samples", ErrArgument, ch.Name(), len(out), n)
+	s, ok := v.([]tdms.Timestamp)
+	if !ok || len(s) != n {
+		return nil, fmt.Errorf("%w: channel %q: read %d of %d timestamp samples", ErrArgument, ch.Name(), sliceLen(v), n)
 	}
-	return out, nil
+	return s, nil
+}
+
+func sliceLen(v any) int {
+	switch s := v.(type) {
+	case []tdms.Timestamp:
+		return len(s)
+	case []float64:
+		return len(s)
+	default:
+		return 0
+	}
+}
+
+func sliceToFloats(v any) ([]float64, error) {
+	switch s := v.(type) {
+	case []float64:
+		return s, nil
+	case []float32:
+		return numsToFloat(s), nil
+	case []int8:
+		return numsToFloat(s), nil
+	case []int16:
+		return numsToFloat(s), nil
+	case []int32:
+		return numsToFloat(s), nil
+	case []int64:
+		return numsToFloat(s), nil
+	case []uint8:
+		return numsToFloat(s), nil
+	case []uint16:
+		return numsToFloat(s), nil
+	case []uint32:
+		return numsToFloat(s), nil
+	case []uint64:
+		return numsToFloat(s), nil
+	case nil:
+		return []float64{}, nil
+	default:
+		return nil, fmt.Errorf("%w: cannot convert %T to float64", ErrArgument, v)
+	}
+}
+
+func numsToFloat[T ~int8 | ~int16 | ~int32 | ~int64 | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~float32](s []T) []float64 {
+	out := make([]float64, len(s))
+	for i, v := range s {
+		out[i] = float64(v)
+	}
+	return out
 }
 
 // addSteps returns t + n*step, or ErrArgument when the product overflows.

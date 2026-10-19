@@ -70,9 +70,9 @@
 // Files whose span misses the window are not opened. A declared timestamp
 // axis is the sample values. Catalog does not prove that the axis is
 // monotonic. When the first step is positive it reads only the first two
-// samples: Dt is that step, and Last is the time of sample n-1 on a uniform
-// arithmetic axis. The core reader has no range read, so the last sample
-// itself is not fetched. That span matches a well-formed clock and is
+// samples, via Slice: Dt is that step, and Last is the time of sample n-1 on
+// a uniform arithmetic axis. The last sample itself is not fetched. That span
+// matches a well-formed clock and is
 // provisional otherwise. A window that misses it does not open the file, so
 // an irregular axis can be skipped. A first step that is not positive is
 // scanned in full (true min/max, Dt only when every step matches). Read

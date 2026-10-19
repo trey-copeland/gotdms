@@ -75,7 +75,9 @@ func TestSharedClockDecodedOnce(t *testing.T) {
 		}
 	}
 	// One full decode of the clock is two n*8 buffers. Eight of those is the
-	// old per-channel walk. Catalog has to stay under a single decode.
+	// old per-channel walk. Catalog has to stay under a single decode. A
+	// two-sample Cursor also fails this: it allocates the 256 KiB sequential
+	// read buffer. The head read has to stay a short Slice.
 	delta := m2.TotalAlloc - m1.TotalAlloc
 	limit := uint64(n) * 8 * 2
 	if delta >= limit {
