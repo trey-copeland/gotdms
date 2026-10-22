@@ -4,6 +4,10 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
+### Fixed
+
+- `.github/workflows/test-and-publish-go-release.yml` checks out with `fetch-depth: 0` and `fetch-tags: true`, matching the module workflow, so a tag run can read `v0.1.0`. `TestSegmentIndexV010MissesVersion2` skips when the package directory is not inside a git work tree (`git rev-parse --is-inside-work-tree`). A module-cache `go test`, including `go test all`, no longer fails for the missing `.git`. When `CI` is set, a missing work tree or tag is still a failure and the message names that checkout.
+
 ## v0.1.1 (2026-10-22)
 
 `v0.1.1` is the changes since `v0.1.0` (`622cb34`). Those changes landed on `main` in `2c3aa15` ([#16](https://github.com/trey-copeland/gotdms/pull/16)).

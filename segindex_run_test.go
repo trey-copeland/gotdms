@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
@@ -172,9 +173,28 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 }
 
 func TestSegmentIndexV010MissesVersion2(t *testing.T) {
-	out, err := exec.Command("git", "show", "v0.1.0:segindex.go").Output()
+	const hint = "v0.1.0 tag is not in this checkout; fetch full history and tags (actions/checkout fetch-depth: 0 and fetch-tags: true)"
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate package source")
+	}
+	dir := filepath.Dir(file)
+	wt := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	wt.Dir = dir
+	out, err := wt.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		// The module cache has no .git. Skip so `go test all` can run there.
+		// CI still fails: a tag checkout must be a work tree with history.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("%s: package directory is not a git work tree", hint)
+		}
+		t.Skip("package directory is not a git work tree")
+	}
+	show := exec.Command("git", "show", "v0.1.0:segindex.go")
+	show.Dir = dir
+	out, err = show.Output()
 	if err != nil {
-		t.Fatalf("v0.1.0 tag is not in this checkout; fetch full history and tags (actions/checkout fetch-depth: 0 and fetch-tags: true): %v", err)
+		t.Fatalf("%s: %v", hint, err)
 	}
 	src := string(out)
 	if !strings.Contains(src, "segmentIndexVersion = 1") {
