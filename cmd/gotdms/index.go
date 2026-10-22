@@ -33,6 +33,7 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	var paths []string
+	seen := map[string]bool{}
 	failed := false
 	for _, arg := range fs.Args() {
 		got, err := expandIndexArg(arg)
@@ -41,7 +42,17 @@ func runIndex(args []string, stdout, stderr io.Writer) int {
 			failed = true
 			continue
 		}
-		paths = append(paths, got...)
+		for _, p := range got {
+			key := filepath.Clean(p)
+			if abs, err := filepath.Abs(p); err == nil {
+				key = abs
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			paths = append(paths, p)
+		}
 	}
 	for _, path := range paths {
 		if err := indexOne(path, *force, *check, stdout, stderr); err != nil {
@@ -94,8 +105,17 @@ func indexOne(path string, force, check bool, stdout, stderr io.Writer) error {
 }
 
 func expandIndexArg(arg string) ([]string, error) {
-	// Stat of a pattern is an invalid-name error on Windows, not
-	// ErrNotExist, so patterns are expanded before any Stat.
+	// An existing path is taken literally, so a file named "run[1].tdms"
+	// is that file and not a pattern. Stat of a pattern is an invalid-name
+	// error on Windows, not ErrNotExist, so any Stat failure on an argument
+	// with metacharacters falls through to the glob.
+	fi, statErr := os.Stat(arg)
+	if statErr == nil {
+		if !fi.IsDir() {
+			return []string{arg}, nil
+		}
+		return tdmsInDir(arg)
+	}
 	if hasGlobMeta(arg) {
 		matches, err := filepath.Glob(arg)
 		if err != nil {
@@ -117,14 +137,7 @@ func expandIndexArg(arg string) ([]string, error) {
 		}
 		return out, nil
 	}
-	fi, err := os.Stat(arg)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.IsDir() {
-		return []string{arg}, nil
-	}
-	return tdmsInDir(arg)
+	return nil, statErr
 }
 
 func tdmsInDir(dir string) ([]string, error) {
@@ -137,9 +150,14 @@ func tdmsInDir(dir string) ([]string, error) {
 		if e.IsDir() {
 			continue
 		}
-		if strings.EqualFold(filepath.Ext(e.Name()), ".tdms") {
-			out = append(out, filepath.Join(dir, e.Name()))
+		if !strings.EqualFold(filepath.Ext(e.Name()), ".tdms") {
+			continue
 		}
+		p := filepath.Join(dir, e.Name())
+		if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, p)
 	}
 	sort.Strings(out)
 	if len(out) == 0 {

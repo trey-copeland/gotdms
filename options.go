@@ -87,8 +87,17 @@ func WithSegmentIndex(sidecar string) ReaderOption {
 // and modification time, and that does not replace the inode, is missed: the
 // object tree and spans come from the sidecar, not from the bytes now on
 // disk. Restoring the modification time with os.Chtimes after such an edit
-// is the usual way that happens. Changing the size, the modification time,
-// or the device and inode (a replaced file) is still a cache miss.
+// is the usual way that happens. Changing the size or the modification time
+// is still a cache miss. Where the platform reports a device and inode,
+// replacing the file is a miss even when size and modification time were
+// copied onto the new file.
+//
+// On Windows, and on any other platform that reports no device and inode,
+// trust mode checks only size and modification time. Both identity fields
+// are stored as 0. FAT records modification time in steps of 2 seconds, and
+// exFAT in steps of 10 milliseconds, so two writes inside one step share a
+// timestamp. An edit that lands in the same step is missed, just as an edit
+// whose timestamp was restored is missed.
 //
 // Decode bounds checks stay in force. A span that addresses bytes outside
 // the file, or that claims more samples than the file can hold, is a decode
@@ -99,10 +108,7 @@ func WithSegmentIndex(sidecar string) ReaderOption {
 // The option does nothing unless WithSegmentIndex names a sidecar. It does
 // not change what BuildSegmentIndex writes. A sidecar whose final segment
 // was recovered with WithLenientTail is still a miss when this open is not
-// lenient, so a strict Open keeps returning ErrTruncated. Where the platform
-// reports a device and inode, replacing the file is a miss even when size
-// and modification time were copied onto the new file. Where both are 0,
-// only size and modification time are compared.
+// lenient, so a strict Open keeps returning ErrTruncated.
 func WithSegmentIndexTrustIdentity() ReaderOption {
 	return func(c *readerConfig) {
 		c.indexTrustIdentity = true

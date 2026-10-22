@@ -178,15 +178,21 @@ func newReader(r io.ReaderAt, path string, opts ...ReaderOption) (*File, error) 
 		gindex:  map[string]int{},
 		byPath:  map[string]*Channel{},
 	}
-	if cfg.indexSidecar != "" && f.trySegmentIndex(cfg.indexSidecar, cfg.indexTrustIdentity) {
-		return f, nil
+	var pre os.FileInfo
+	if cfg.indexSidecar != "" {
+		// Stat the open handle, not the path, before any parse. The sidecar
+		// must describe the bytes this File reads.
+		pre, _ = f.statData()
+		if f.trySegmentIndex(cfg.indexSidecar, cfg.indexTrustIdentity, pre) {
+			return f, nil
+		}
 	}
 	if err := f.parse(); err != nil {
 		return nil, err
 	}
 	if cfg.indexSidecar != "" {
 		// A cache write failure leaves the open valid. The next open parses.
-		_ = f.writeSegmentIndex(cfg.indexSidecar)
+		_ = f.writeSegmentIndex(cfg.indexSidecar, pre)
 	}
 	return f, nil
 }

@@ -158,3 +158,23 @@ func TestSegmentIndexTrustIdentityOption(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSegmentIndexTrustThenDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.tdms")
+	writePair(t, path, "acq", "ai0", []float64{0, 1}, []float64{10, 11})
+	off := openAt(t, dir, WithSegmentIndexTrustIdentity(), WithSegmentIndex(false))
+	if _, err := off.Read(Selector{Name: "ai0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tdms.SegmentIndexPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("WithSegmentIndex(false) after trust still wrote a sidecar: %v", err)
+	}
+	on := openAt(t, dir, WithSegmentIndex(false), WithSegmentIndexTrustIdentity())
+	if _, err := on.Read(Selector{Name: "ai0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tdms.SegmentIndexPath(path)); err != nil {
+		t.Fatalf("trust after WithSegmentIndex(false) did not enable the sidecar: %v", err)
+	}
+}

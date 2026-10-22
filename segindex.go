@@ -2,10 +2,12 @@ package tdms
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Segment-index sidecar, version 1. Little-endian. This is not an NI
@@ -23,7 +25,8 @@ import (
 //	48  4   uint32 TDMS version of the first segment (4712 or 4713)
 //	52  4   uint32 segment count
 //	56  4   uint32 flags: bit 0 incomplete final segment, bit 1 partial tail,
-//	        bit 2 final segment recovered by WithLenientTail (truncated)
+//	        bit 2 final segment recovered by WithLenientTail (truncated).
+//	        Any other bit is rejected.
 //	60  4   uint32 reserved, must be 0
 //	64  8   int64  unused tail bytes
 //	72      payload
@@ -139,16 +142,29 @@ func (f *File) dataPath() string {
 	return ""
 }
 
-func (f *File) trySegmentIndex(sidecar string, trustIdentity bool) bool {
+// statData stats the data file through the open handle when the reader
+// has one, so a file replaced at its path after the open is not mistaken for
+// the bytes being read. Other readers fall back to the recorded path.
+func (f *File) statData() (os.FileInfo, error) {
+	if s, ok := f.r.(interface{ Stat() (os.FileInfo, error) }); ok {
+		return s.Stat()
+	}
 	data := f.dataPath()
-	if data == "" || sidecar == "" {
+	if data == "" {
+		return nil, os.ErrNotExist
+	}
+	return os.Stat(data)
+}
+
+func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, fi os.FileInfo) bool {
+	data := f.dataPath()
+	if data == "" || sidecar == "" || fi == nil {
 		return false
 	}
 	if filepath.Clean(sidecar) == filepath.Clean(data) {
 		return false
 	}
-	fi, err := os.Stat(data)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() != f.size {
+	if !fi.Mode().IsRegular() || fi.Size() != f.size {
 		return false
 	}
 	sf, err := os.Stat(sidecar)
@@ -209,28 +225,50 @@ func (f *File) installIndex(img *indexImage) {
 	f.indexUsed = true
 }
 
-func (f *File) writeSegmentIndex(sidecar string) error {
+// writeSegmentIndex records pre, the handle's stat taken before the parse.
+// The handle is stat'ed again here; a size, modification time, or identity
+// change in between means the parsed tree may not match the bytes the
+// sidecar would be keyed to, so nothing is written.
+func (f *File) writeSegmentIndex(sidecar string, pre os.FileInfo) error {
 	data := f.dataPath()
 	if data == "" || sidecar == "" || filepath.Clean(sidecar) == filepath.Clean(data) {
 		return nil
 	}
-	fi, err := os.Stat(data)
+	if pre == nil {
+		return fmt.Errorf("segment index: no stat of the data file before parse")
+	}
+	fi, err := f.statData()
 	if err != nil {
 		return err
 	}
-	if fi.Size() != f.size {
+	dev, ino := fileIdentity(fi)
+	pdev, pino := fileIdentity(pre)
+	if fi.Size() != f.size || pre.Size() != f.size {
 		return fmt.Errorf("segment index: file size changed during parse")
+	}
+	if fi.ModTime().UnixNano() != pre.ModTime().UnixNano() || dev != pdev || ino != pino {
+		return fmt.Errorf("segment index: file changed during parse")
 	}
 	fp, err := segmentFingerprint(f.r, f.size, f.lenient)
 	if err != nil {
 		return err
 	}
-	dev, ino := fileIdentity(fi)
 	blob, err := encodeSegmentIndex(f, fi.Size(), fi.ModTime().UnixNano(), dev, ino, fp)
 	if err != nil {
 		return err
 	}
-	return writeAtomic(sidecar, blob)
+	return writeAtomic(sidecar, blob, sidecarPerm(fi))
+}
+
+// sidecarPerm gives the sidecar the data file's read and write bits, so a
+// user who can read the TDMS file can also read its index. os.CreateTemp
+// alone would leave it 0600.
+func sidecarPerm(fi os.FileInfo) os.FileMode {
+	perm := fi.Mode().Perm() & 0o666
+	if perm == 0 {
+		perm = 0o644
+	}
+	return perm | 0o200
 }
 
 // BuildSegmentIndex parses lead-ins and metadata of path and writes
@@ -264,12 +302,16 @@ func BuildSegmentIndexFile(path string, opts ...ReaderOption) (string, error) {
 	if cfg.lenientTail {
 		ropts = append(ropts, WithLenientTail())
 	}
+	pre, err := rf.Stat()
+	if err != nil {
+		return "", wrap("index", path, err)
+	}
 	tf, err := newReader(rf, path, ropts...)
 	if err != nil {
 		return "", err
 	}
 	side := SegmentIndexPath(path)
-	werr := tf.writeSegmentIndex(side)
+	werr := tf.writeSegmentIndex(side, pre)
 	tf.Close()
 	if werr != nil {
 		return "", wrap("index", side, werr)
@@ -498,6 +540,9 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 		return nil, errIndex
 	}
 	flags := binary.LittleEndian.Uint32(b[56:60])
+	if flags&^(indexFlagIncomplete|indexFlagPartial|indexFlagTruncated) != 0 {
+		return nil, errIndex
+	}
 	img := &indexImage{
 		size:       size,
 		mtime:      mtime,
@@ -917,7 +962,9 @@ func (r *ixr) props() ([]Property, error) {
 	if n == 0 {
 		return nil, nil
 	}
-	out := make([]Property, 0, n)
+	// n is bounded by the bytes left, not by memory: a Property is far
+	// larger than its 4-byte minimum on disk. Grow as records decode.
+	out := make([]Property, 0, min(n, 64))
 	for i := 0; i < n; i++ {
 		ln, err := r.u32()
 		if err != nil {
@@ -1010,7 +1057,7 @@ func (r *ixr) span() (span, error) {
 	return sp, nil
 }
 
-func writeAtomic(path string, data []byte) error {
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".gtdx-*.tmp")
 	if err != nil {
@@ -1027,6 +1074,10 @@ func writeAtomic(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Chmod(perm); err != nil && !isUnsupportedChmod(err) {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
@@ -1038,13 +1089,40 @@ func writeAtomic(path string, data []byte) error {
 		return err
 	}
 	success = true
+	syncDir(dir)
 	return nil
 }
 
+// isUnsupportedChmod reports a chmod failure from a filesystem without mode
+// bits (some network shares). The sidecar is still usable there.
+func isUnsupportedChmod(err error) bool {
+	return errors.Is(err, errors.ErrUnsupported) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP)
+}
+
+// syncDir makes the rename durable where the platform allows opening a
+// directory. It is best effort: a failure leaves a valid sidecar that may
+// not survive a crash, and Open treats a missing sidecar as a miss.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
+}
+
+// replaceFile renames tmp over dst. os.Rename replaces an existing file on
+// every supported platform, including Windows (MoveFileEx with
+// MOVEFILE_REPLACE_EXISTING). The remove-and-retry fallback is limited to a
+// regular file at dst, so it never deletes a directory or other object.
 func replaceFile(tmp, dst string) error {
 	err := os.Rename(tmp, dst)
 	if err == nil {
 		return nil
+	}
+	st, lerr := os.Lstat(dst)
+	if lerr != nil || !st.Mode().IsRegular() {
+		return err
 	}
 	if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
 		return err
