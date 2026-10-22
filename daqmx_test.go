@@ -555,8 +555,9 @@ func TestDAQmxMultiSegment(t *testing.T) {
 }
 
 func TestDAQmxPartialTails(t *testing.T) {
-	// Index promises 4 int16 samples (8 bytes). Five bytes are on disk.
-	file := buildDAQmx(daqTOC, []dmObj{daqI16(0, 4)}, i16Raw(1, 2)[:3])
+	// Index promises 4 int16 samples (8 bytes). Five bytes are on disk:
+	// two whole samples and one unused byte.
+	file := buildDAQmx(daqTOC, []dmObj{daqI16(0, 4)}, append(i16Raw(1, 2), 0x00))
 	// The builder's next offset matches the short file, which is a finished
 	// segment whose raw length is not a chunk. That is corrupt.
 	mustOpenErr(t, file, ErrCorrupt)
@@ -565,7 +566,7 @@ func TestDAQmxPartialTails(t *testing.T) {
 	markIncomplete(inc)
 	f := openBytes(t, inc)
 	c := daqCh(t, f, "g", "c")
-	assertEqual(t, mustValues(t, c), []int16{1})
+	assertEqual(t, mustValues(t, c), []int16{1, 2})
 	st := f.Status()
 	if !st.Incomplete || st.Complete || !st.PartialTail || st.UnusedTail != 1 {
 		t.Fatalf("%#v", st)
@@ -584,7 +585,7 @@ func TestDAQmxPartialTails(t *testing.T) {
 	}
 	t.Cleanup(func() { lf.Close() })
 	c = daqCh(t, lf, "g", "c")
-	assertEqual(t, mustValues(t, c), []int16{1})
+	assertEqual(t, mustValues(t, c), []int16{1, 2})
 	st = lf.Status()
 	if !st.Truncated || st.Incomplete || !st.PartialTail || st.UnusedTail != 1 {
 		t.Fatalf("%#v", st)

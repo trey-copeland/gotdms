@@ -22,10 +22,11 @@ DAQmx files are also generated in that job, not checked in. `harness.py`
 calls npTDMS's own test helpers (`daqmx_scaler_metadata`,
 `digital_scaler_metadata`, `daqmx_channel_metadata`, `GeneratedFile`) to
 build the bytes, then compares gotdms `Float64s` with npTDMS `raw_data`
-(`read_data(scaled=False)`). One file carries a linear `NI_Scale` so both
-sides are checked against the raw samples, not the scaled engineering
-values. The helpers write index word `0x00001269` for a format-changing
-scaler and `0x0000126A` for a digital line. The `0x00001369` file is that
-same `0x00001269` file with the index word changed; gotdms is compared to
-the raw values npTDMS read from the original. No npTDMS decoder source is
+(`read_data(scaled=False)`). One file carries a linear `NI_Scale`. Both
+sides are checked against the raw samples. npTDMS does not apply that scale
+through `channel[:]` for a DAQmx raw buffer, so the harness does not call
+it. The helpers write index word `0x00001269` for a format-changing scaler
+and `0x0000126A` for a digital line. The `0x00001369` file is that same
+`0x00001269` file with the index word changed; gotdms is compared to the
+raw values npTDMS read from the original. No npTDMS decoder source is
 vendored or ported.

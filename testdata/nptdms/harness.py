@@ -179,6 +179,11 @@ def f64_prop(value):
     return (10, hexlify_value("<d", value))
 
 
+def u32_prop(value):
+    # tdsTypeU32 is 7. 0xFFFFFFFF is the DAQmx raw-input sentinel.
+    return (7, hexlify_value("<I", value))
+
+
 def write_generated(path, segments):
     generated = GeneratedFile()
     for toc, metadata, data in segments:
@@ -273,6 +278,7 @@ def daqmx_oracle():
         "NI_Scale[0]_Scale_Type": str_prop("Linear"),
         "NI_Scale[0]_Linear_Slope": f64_prop(2.0),
         "NI_Scale[0]_Linear_Y_Intercept": f64_prop(10.0),
+        "NI_Scale[0]_Linear_Input_Source": u32_prop(0xFFFFFFFF),
     }
     meta_scaled = segment_objects_metadata(
         root_metadata(),
@@ -316,18 +322,10 @@ def daqmx_oracle():
         with open(os.path.join(tmp, "i16-1369.tdms"), "wb") as fh:
             fh.write(alt)
 
-        scaled_path = os.path.join(tmp, "scaled.tdms")
-        scaled_np = TdmsFile.read(scaled_path)
-        try:
-            ch = scaled_np["Group"]["Channel1"]
-            raw_vals = [float(x) for x in ch.raw_data]
-            scaled_vals = [float(x) for x in ch[:]]
-        finally:
-            scaled_np.close()
-        if raw_vals == scaled_vals:
-            raise SystemExit("scaled channel[:] matched raw_data; the oracle would not prove raw reads")
-        if scaled_vals != [12.0, 14.0, 16.0]:
-            raise SystemExit(f"npTDMS scaled values {scaled_vals}")
+        # The linear scale would turn [1, 2, 3] into [12, 14, 16]. npTDMS
+        # raw_data stays [1, 2, 3]. channel[:] cannot apply that scale to a
+        # DAQmx raw buffer, so the oracle is raw_data, not the scaled view.
+        # A gotdms read that applied the scale would disagree with raw_data.
 
         want = {}
         for name in list(specs) + ["segments.tdms"]:
@@ -336,8 +334,9 @@ def daqmx_oracle():
         got = go_read(tmp)
         for name, wdoc in want.items():
             compare_raw(got[name], wdoc, f"daqmx {name}")
-        if got["scaled.tdms"]["channels"][0]["values"] == scaled_vals:
-            raise SystemExit("gotdms returned scaled values")
+        scaled_got = got["scaled.tdms"]["channels"][0]["values"]
+        if scaled_got != [1.0, 2.0, 3.0]:
+            raise SystemExit(f"gotdms scaled file returned {scaled_got}, want raw [1, 2, 3]")
 
 
 if __name__ == "__main__":
