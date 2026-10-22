@@ -401,32 +401,6 @@ func TestGoldenQuotedName(t *testing.T) {
 	assertEqual(t, mustValues(t, ch), []uint8{0x2A})
 }
 
-func TestGoldenDAQmxRejected(t *testing.T) {
-	// Index begins with bytes 69 12 00 00, the article's format-changing scaler.
-	for _, marker := range []uint32{RawIndexDAQmxFormatChanging, RawIndexDAQmxDigitalLine, RawIndexDAQmxDigitalObserved} {
-		var meta bytes.Buffer
-		binary.Write(&meta, binary.LittleEndian, uint32(1))
-		p := "/'g'/'c'"
-		binary.Write(&meta, binary.LittleEndian, uint32(len(p)))
-		meta.WriteString(p)
-		binary.Write(&meta, binary.LittleEndian, marker)
-		// Minimal scaler tail so a buggy reader that skips the marker still
-		// does not run off the buffer if it tries to continue. We expect an
-		// error before any of this is interpreted as samples.
-		binary.Write(&meta, binary.LittleEndian, uint32(0xFFFFFFFF))
-		binary.Write(&meta, binary.LittleEndian, uint32(1))
-		binary.Write(&meta, binary.LittleEndian, uint64(0))
-		binary.Write(&meta, binary.LittleEndian, uint32(0)) // scaler vector size
-		binary.Write(&meta, binary.LittleEndian, uint32(0)) // width vector size
-		binary.Write(&meta, binary.LittleEndian, uint32(0)) // properties
-		file := finishSegment(t, TocMetaData|TocNewObjList|TocRawData|TocDAQmxRawData, meta.Bytes(), nil)
-		_, err := NewReader(bytes.NewReader(file))
-		if !errors.Is(err, ErrDAQmx) {
-			t.Fatalf("marker %#x: %v", marker, err)
-		}
-	}
-}
-
 func TestGoldenIncompleteSentinel(t *testing.T) {
 	// Index promises 4 int32 values. The segment is the final one (next offset
 	// all 0xFF) and only two values were flushed to disk.

@@ -156,7 +156,13 @@ func ileaveKeyOf(sp *span) ileaveKey {
 }
 
 func interleavedSpan(sp *span) bool {
-	return sp != nil && !sp.str && sp.typeSize > 0 && sp.stride > int64(sp.typeSize)
+	if sp == nil || sp.str || sp.digital || sp.solo || sp.typeSize <= 0 {
+		return false
+	}
+	if sp.stride <= int64(sp.typeSize) || sp.col < 0 || int64(sp.typeSize) > sp.stride-sp.col {
+		return false
+	}
+	return true
 }
 
 func spanSamples(sp *span) (int64, error) {

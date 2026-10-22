@@ -59,9 +59,12 @@ const (
 	indexFlagIncomplete = 1 << 0
 	indexFlagPartial    = 1 << 1
 
-	spanFlagBig  = 1 << 0
-	spanFlagStr  = 1 << 1
-	spanFlagLive = 1 << 2
+	spanFlagBig     = 1 << 0
+	spanFlagStr     = 1 << 1
+	spanFlagLive    = 1 << 2
+	spanFlagDigital = 1 << 3
+	spanFlagSolo    = 1 << 4
+	spanBitShift    = 8
 
 	// spanRecord is the on-disk size of one span. See SegmentIndexPath.
 	spanRecord = 96
@@ -90,9 +93,13 @@ const (
 //
 // A property is a uint32 length and the ordinary TDMS property encoding.
 // A span is 96 bytes: data position, chunk size, chunk count, values per
-// chunk, column, stride, type size, a flag word (big-endian, string, live),
-// string block size, and the partial-chunk position fields. Invalidation is
-// size, modification time, device, inode, the metadata fingerprint, and the
+// chunk, column, stride, type size, a flag word, string block size, and the
+// partial-chunk position fields. The flag word is big-endian, string, live,
+// digital line, and a raw buffer that does not start at the chunk
+// (solo). A digital span stores its bit index in bits 8–15. A channel whose
+// has-type byte is 2 is DAQmx: after the channel total, the sidecar stores
+// the scaler vector and any non-primary scaler spans. Invalidation is size,
+// modification time, device, inode, the metadata fingerprint, and the
 // payload checksum. Raw sample bytes are not in the sidecar.
 func SegmentIndexPath(path string) string {
 	return path + ".gtdx"
@@ -243,9 +250,6 @@ func segmentFingerprint(r interface {
 		if lead.version != Version10 && lead.version != Version20 {
 			return 0, ErrVersion
 		}
-		if lead.toc&TocDAQmxRawData != 0 {
-			return 0, ErrDAQmx
-		}
 		segEnd, _, _, err := segmentBounds(pos, size, lead, false)
 		if err != nil {
 			return 0, err
@@ -323,9 +327,12 @@ func encodeIndexPayload(f *File) ([]byte, error) {
 				return nil, err
 			}
 			w.u32(uint32(ch.dt))
-			if ch.hasDT {
-				w.u8(1)
-			} else {
+			switch {
+			case ch.daqmx != nil && ch.hasDT:
+				w.u8(indexHasDAQmx)
+			case ch.hasDT:
+				w.u8(indexHasType)
+			default:
 				w.u8(0)
 			}
 			if err := w.props(ch.props); err != nil {
@@ -336,6 +343,9 @@ func encodeIndexPayload(f *File) ([]byte, error) {
 				w.span(sp)
 			}
 			w.i64(ch.total)
+			if ch.daqmx != nil && ch.hasDT {
+				w.daqmxBlock(ch.daqmx)
+			}
 		}
 	}
 	return w.b, nil
@@ -440,7 +450,7 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 			if err != nil {
 				return nil, err
 			}
-			if has > 1 {
+			if has > indexHasDAQmx {
 				return nil, errIndex
 			}
 			cprops, err := r.props()
@@ -473,14 +483,22 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 			if err != nil || got != total {
 				return nil, errIndex
 			}
+			var dx *daqmxState
+			if has == indexHasDAQmx {
+				dx, err = r.daqmxBlock(spans, total)
+				if err != nil {
+					return nil, err
+				}
+			}
 			ch := &Channel{
 				name:  cn,
 				path:  cp,
 				dt:    DataType(dt),
-				hasDT: has == 1,
+				hasDT: has == indexHasType || has == indexHasDAQmx,
 				props: cprops,
 				spans: spans,
 				total: total,
+				daqmx: dx,
 			}
 			if !ch.hasDT && (ch.dt != TypeVoid || len(ch.spans) != 0 || ch.total != 0) {
 				return nil, errIndex
@@ -513,6 +531,18 @@ func spansInFile(img *indexImage) error {
 			for _, sp := range ch.spans {
 				if err := spanInFile(sp, img.size); err != nil {
 					return err
+				}
+			}
+			if ch.daqmx != nil {
+				for i, sps := range ch.daqmx.spans {
+					if i == ch.daqmx.spec.primary {
+						continue
+					}
+					for _, sp := range sps {
+						if err := spanInFile(sp, img.size); err != nil {
+							return err
+						}
+					}
 				}
 			}
 		}
@@ -658,6 +688,13 @@ func (w *ixw) span(sp span) {
 	}
 	if sp.live {
 		flags |= spanFlagLive
+	}
+	if sp.digital {
+		flags |= spanFlagDigital
+		flags |= uint32(sp.bit) << spanBitShift
+	}
+	if sp.solo {
+		flags |= spanFlagSolo
 	}
 	w.u32(flags)
 	w.i64(sp.strSize)
@@ -823,7 +860,18 @@ func (r *ixr) span() (span, error) {
 	sp.big = flags&spanFlagBig != 0
 	sp.str = flags&spanFlagStr != 0
 	sp.live = flags&spanFlagLive != 0
-	if flags&^(spanFlagBig|spanFlagStr|spanFlagLive) != 0 {
+	sp.digital = flags&spanFlagDigital != 0
+	sp.solo = flags&spanFlagSolo != 0
+	sp.bit = uint8((flags >> spanBitShift) & 0xFF)
+	const spanFlagKnown = spanFlagBig | spanFlagStr | spanFlagLive | spanFlagDigital | spanFlagSolo | (0xFF << spanBitShift)
+	if flags&^spanFlagKnown != 0 {
+		return span{}, errIndex
+	}
+	if sp.digital {
+		if sp.bit > 7 {
+			return span{}, errIndex
+		}
+	} else if sp.bit != 0 {
 		return span{}, errIndex
 	}
 	if sp.dataPos < 0 || sp.chunkSize < 0 || sp.nChunks < 0 || sp.nPerChunk < 0 ||

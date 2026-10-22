@@ -17,6 +17,21 @@ from datetime import datetime, timezone
 
 import numpy as np
 from nptdms import ChannelObject, RootObject, TdmsFile, TdmsWriter
+from nptdms.test.test_daqmx import (
+    daqmx_channel_metadata,
+    daqmx_scaler_metadata,
+    digital_scaler_metadata,
+    segment_toc,
+)
+from nptdms.test.util import (
+    GeneratedFile,
+    channel_metadata_with_repeated_structure,
+    group_metadata,
+    hexlify_value,
+    root_metadata,
+    segment_objects_metadata,
+    string_hexlify,
+)
 
 
 def go(*args):
@@ -151,7 +166,178 @@ def main():
             ChannelObject("g", "t", np.array([when], dtype="datetime64[s]")),
         ])
         compare_docs(go_read(py_dir), written, "gotdms read of npTDMS")
+        daqmx_oracle()
     print("npTDMS differential ok")
+
+
+def str_prop(text):
+    return (0x20, hexlify_value("<I", len(text)) + string_hexlify(text))
+
+
+def f64_prop(value):
+    # tdsTypeDoubleFloat is 10.
+    return (10, hexlify_value("<d", value))
+
+
+def write_generated(path, segments):
+    generated = GeneratedFile()
+    for toc, metadata, data in segments:
+        generated.add_segment(toc, metadata, data)
+    with open(path, "wb") as fh:
+        fh.write(generated._get_contents())
+    return generated._get_contents()
+
+
+def np_raw_doc(path):
+    opened = TdmsFile.read(path)
+    doc = {"channels": []}
+    try:
+        for group in opened.groups():
+            for ch in group.channels():
+                data = ch.raw_data
+                values = [] if data is None else [float(x) for x in data]
+                doc["channels"].append({"group": group.name, "name": ch.name, "values": values})
+    finally:
+        opened.close()
+    return doc
+
+
+def compare_raw(got, want, label):
+    gchs = {(c["group"], c["name"]): c["values"] for c in got["channels"]}
+    wchs = {(c["group"], c["name"]): c["values"] for c in want["channels"]}
+    if set(gchs) != set(wchs):
+        raise SystemExit(f"{label}: channels {sorted(gchs)} != {sorted(wchs)}")
+    for key, wv in wchs.items():
+        gv = gchs[key]
+        if len(gv) != len(wv):
+            raise SystemExit(f"{label} {key}: len {len(gv)} != {len(wv)}")
+        for i, (a, b) in enumerate(zip(gv, wv)):
+            same(a, b, f"{label} {key}[{i}]")
+
+
+def daqmx_oracle():
+    """Files built by npTDMS test helpers. gotdms is compared to raw_data.
+
+    The helpers write 0x00001269 for format-changing scalers and 0x0000126A
+    for digital lines. 0x00001369 is the same format-changing record with the
+    index word changed; npTDMS is not asked to parse that word. The comparison
+    for it is the raw values npTDMS read from the 0x00001269 file.
+    """
+    i16 = daqmx_scaler_metadata(0, 3, 0)
+    i16_hi = daqmx_scaler_metadata(0, 3, 2)
+    meta_i16 = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 4, [2], [i16]),
+    )
+    data_i16 = "01 00 02 00 FF FF FE FF"
+    meta_pair = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 4, [4], [i16]),
+        daqmx_channel_metadata("Channel2", 4, [4], [i16_hi]),
+    )
+    data_pair = "01 00 11 00 02 00 12 00 03 00 13 00 04 00 14 00"
+    buf = [4, 4]
+    meta_buf = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 4, buf, [daqmx_scaler_metadata(0, 3, 0, 0)]),
+        daqmx_channel_metadata("Channel2", 4, buf, [daqmx_scaler_metadata(0, 3, 2, 0)]),
+        daqmx_channel_metadata("Channel3", 4, buf, [daqmx_scaler_metadata(0, 3, 0, 1)]),
+        daqmx_channel_metadata("Channel4", 4, buf, [daqmx_scaler_metadata(0, 3, 2, 1)]),
+    )
+    data_buf = (
+        "01 00 02 00 03 00 04 00"
+        "05 00 06 00 07 00 08 00"
+        "09 00 0A 00 0B 00 0C 00"
+        "0D 00 0E 00 0F 00 10 00"
+    )
+    meta_dig = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata(
+            "Channel1", 4, [4], [digital_scaler_metadata(0, 0, 0)], digital_line_scaler=True
+        ),
+    )
+    data_dig = "00 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00"
+    f64 = daqmx_scaler_metadata(0, 9, 0)
+    meta_f64 = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 2, [8], [f64]),
+    )
+    data_f64 = hexlify_value("<d", 1.5) + hexlify_value("<d", -2.25)
+    scale_props = {
+        "NI_Scaling_Status": str_prop("unscaled"),
+        "NI_Scale[0]_Scale_Type": str_prop("Linear"),
+        "NI_Scale[0]_Linear_Slope": f64_prop(2.0),
+        "NI_Scale[0]_Linear_Y_Intercept": f64_prop(10.0),
+    }
+    meta_scaled = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 3, [2], [i16], properties=scale_props),
+    )
+    data_scaled = "01 00 02 00 03 00"
+    meta_rep = segment_objects_metadata(
+        channel_metadata_with_repeated_structure("/'Group'/'Channel1'")
+    )
+    meta_two = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 2, [2], [i16]),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        specs = {
+            "i16.tdms": (meta_i16, data_i16),
+            "pair.tdms": (meta_pair, data_pair),
+            "buffers.tdms": (meta_buf, data_buf),
+            "digital.tdms": (meta_dig, data_dig),
+            "f64.tdms": (meta_f64, data_f64),
+            "scaled.tdms": (meta_scaled, data_scaled),
+        }
+        for name, (metadata, data) in specs.items():
+            write_generated(os.path.join(tmp, name), [(segment_toc(), metadata, data)])
+        write_generated(
+            os.path.join(tmp, "segments.tdms"),
+            [
+                (segment_toc(), meta_two, "01 00 02 00"),
+                (segment_toc(), meta_rep, "03 00 04 00"),
+            ],
+        )
+        i16_bytes = open(os.path.join(tmp, "i16.tdms"), "rb").read()
+        needle = bytes.fromhex("69120000ffffffff")
+        found = i16_bytes.count(needle)
+        if found != 1:
+            raise SystemExit(f"format-changing header pattern occurs {found} times")
+        alt = i16_bytes.replace(needle, bytes.fromhex("69130000ffffffff"), 1)
+        with open(os.path.join(tmp, "i16-1369.tdms"), "wb") as fh:
+            fh.write(alt)
+
+        scaled_path = os.path.join(tmp, "scaled.tdms")
+        scaled_np = TdmsFile.read(scaled_path)
+        try:
+            ch = scaled_np["Group"]["Channel1"]
+            raw_vals = [float(x) for x in ch.raw_data]
+            scaled_vals = [float(x) for x in ch[:]]
+        finally:
+            scaled_np.close()
+        if raw_vals == scaled_vals:
+            raise SystemExit("scaled channel[:] matched raw_data; the oracle would not prove raw reads")
+        if scaled_vals != [12.0, 14.0, 16.0]:
+            raise SystemExit(f"npTDMS scaled values {scaled_vals}")
+
+        want = {}
+        for name in list(specs) + ["segments.tdms"]:
+            want[name] = np_raw_doc(os.path.join(tmp, name))
+        want["i16-1369.tdms"] = want["i16.tdms"]
+        got = go_read(tmp)
+        for name, wdoc in want.items():
+            compare_raw(got[name], wdoc, f"daqmx {name}")
+        if got["scaled.tdms"]["channels"][0]["values"] == scaled_vals:
+            raise SystemExit("gotdms returned scaled values")
 
 
 if __name__ == "__main__":

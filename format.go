@@ -36,7 +36,9 @@ const (
 	TocInterleavedData uint32 = 1 << 5
 	// TocBigEndian means numeric fields are big-endian. The ToC mask itself stays little-endian.
 	TocBigEndian uint32 = 1 << 6
-	// TocDAQmxRawData means the raw-data section is DAQmx-scaled. Reading it returns ErrDAQmx.
+	// TocDAQmxRawData means the raw-data section is DAQmx raw buffers rather than
+	// one standard block per channel. Format-changing and digital-line indexes
+	// in that section are decoded. A standard index under this flag returns ErrDAQmx.
 	TocDAQmxRawData uint32 = 1 << 7
 
 	// RawIndexNoData is stored in place of a raw-data index when the object has
@@ -49,14 +51,17 @@ const (
 	// DAQmx format-changing scaler. Decimal 4713, the same number as Version20,
 	// but it occupies the index-length field rather than the version field.
 	RawIndexDAQmxFormatChanging uint32 = 0x00001269
-	// RawIndexDAQmxDigitalLine is the NI article's digital-line scaler marker,
-	// bytes 69 13 00 00. The article does not mention 0x12C9 (decimal 4809);
-	// that constant is not recognized.
+	// RawIndexDAQmxDigitalLine is bytes 69 13 00 00. The NI article calls this a
+	// digital-line scaler. The layout read for this word is the format-changing
+	// scaler (the same five uint32 fields as RawIndexDAQmxFormatChanging).
+	// Digital-line scalers in NI-produced files use RawIndexDAQmxDigitalObserved.
+	// The article does not mention 0x12C9 (decimal 4809); that word is not a
+	// DAQmx header here.
 	RawIndexDAQmxDigitalLine uint32 = 0x00001369
-	// RawIndexDAQmxDigitalObserved is bytes 6A 12 00 00. npTDMS reports that
-	// NI-produced files use this value for the digital-line scaler and that the
-	// article's 69 13 00 00 does not appear in those files. Both are rejected
-	// with ErrDAQmx.
+	// RawIndexDAQmxDigitalObserved is bytes 6A 12 00 00. A raw-data index that
+	// begins with this word contains a digital-line scaler: three uint32 fields,
+	// a uint8 sample-format bitmap, and a uint32 scale id. Each value is one
+	// bit, returned as uint8 0 or 1.
 	RawIndexDAQmxDigitalObserved uint32 = 0x0000126A
 
 	// incompleteSegment is the next-segment offset of a final segment whose

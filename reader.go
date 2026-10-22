@@ -64,6 +64,7 @@ type Channel struct {
 	idx   rawIndex
 	spans []span
 	total int64
+	daqmx *daqmxState
 }
 
 type rawIndex struct {
@@ -72,6 +73,7 @@ type rawIndex struct {
 	dt    DataType
 	n     int64
 	total int64
+	daqmx *daqmxSpec
 }
 
 // span is one segment's contribution to a channel.
@@ -100,6 +102,14 @@ type span struct {
 	partialPos    int64
 	partialCol    int64
 	partialStride int64
+
+	// digital extracts one bit from each stride. bit is that bit inside the
+	// byte at col (0 is the least significant bit). solo keeps the span out of
+	// the shared ReadValues window: col is an offset within the whole chunk,
+	// which is how a raw buffer after the first one is addressed.
+	digital bool
+	bit     uint8
+	solo    bool
 
 	// live is set on every span from a final segment that is not finished:
 	// the NI incomplete sentinel, or a finite next-segment offset past EOF
@@ -542,27 +552,40 @@ func (c *Channel) readRangeFrom(r io.ReaderAt, start, n int, reuse any) (any, er
 		}
 		return s, nil
 	}
-	if n == 0 {
-		v, err := emptyOf(c.dt)
-		return v, wrap("read", c.path, err)
+	return readTyped(r, c.path, c.dt, c.hasDT, c.spans, c.total, start, n, reuse)
+}
+
+func readTyped(r io.ReaderAt, path string, dt DataType, hasDT bool, spans []span, total int64, start, n int, reuse any) (any, error) {
+	if start < 0 || n < 0 || int64(start) > total || int64(n) > total-int64(start) {
+		return nil, wrap("read", path, fmt.Errorf("%w: range %d:%d of %d", ErrArgument, start, n, total))
 	}
-	if v, ok, err := c.readFast(r, start, n, reuse); ok || err != nil {
+	if !hasDT {
+		if n == 0 {
+			return nil, nil
+		}
+		return nil, wrap("read", path, ErrCorrupt)
+	}
+	if n == 0 {
+		v, err := emptyOf(dt)
+		return v, wrap("read", path, err)
+	}
+	if v, ok, err := readFastSpans(dt, spans, r, start, n, reuse); ok || err != nil {
 		if err != nil {
-			return nil, wrap("read", c.path, err)
+			return nil, wrap("read", path, err)
 		}
 		return v, nil
 	}
-	sz, ok := c.dt.Size()
+	sz, ok := dt.Size()
 	if !ok {
-		return nil, wrap("read", c.path, fmt.Errorf("%w: %s", ErrUnsupported, c.dt))
+		return nil, wrap("read", path, fmt.Errorf("%w: %s", ErrUnsupported, dt))
 	}
-	buf, err := c.readPacked(r, start, n, sz)
-	if err != nil {
-		return nil, wrap("read", c.path, err)
+	buf := make([]byte, n*sz)
+	if err := fillPackedSpans(spans, dt, r, start, n, sz, buf); err != nil {
+		return nil, wrap("read", path, err)
 	}
-	v, err := decodePacked(c.dt, buf)
+	v, err := decodePacked(dt, buf)
 	if err != nil {
-		return nil, wrap("read", c.path, err)
+		return nil, wrap("read", path, err)
 	}
 	return v, nil
 }
@@ -592,9 +615,6 @@ func (f *File) parse() error {
 		}
 		if f.segs == 0 {
 			f.version = lead.version
-		}
-		if lead.toc&TocDAQmxRawData != 0 {
-			return wrapf("read", f.path, ErrDAQmx, "segment at %d sets kTocDAQmxRawData", pos)
 		}
 		segEnd, dataPos, truncated, err := segmentBounds(pos, f.size, lead, f.lenient)
 		if err != nil {
@@ -634,7 +654,7 @@ func (f *File) parse() error {
 			}
 			interleaved := lead.toc&TocInterleavedData != 0
 			live := lead.next == incompleteSegment || truncated
-			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, live); err != nil {
+			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, live, lead.toc&TocDAQmxRawData != 0); err != nil {
 				return wrapf("read", f.path, err, "segment at %d", pos)
 			}
 		}
@@ -700,6 +720,7 @@ const (
 	idxNone = iota
 	idxMatch
 	idxFull
+	idxDAQmx
 )
 
 func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw, big bool) ([]string, error) {
@@ -745,7 +766,7 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 			return nil, wrapf("read", opath, ErrCorrupt, "duplicate object in segment")
 		}
 		seen[opath] = true
-		mode, body, err := d.rawHeader()
+		mode, body, spec, err := d.rawHeader()
 		if err != nil {
 			return nil, wrap("read", opath, err)
 		}
@@ -775,6 +796,9 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 			if ch == nil {
 				return nil, wrap("read", opath, fmt.Errorf("%w: raw data on non-channel", ErrCorrupt))
 			}
+			if ch.idx.daqmx != nil || ch.daqmx != nil {
+				return nil, wrap("read", opath, fmt.Errorf("%w: channel changed from DAQmx raw data to a standard index", ErrCorrupt))
+			}
 			if ch.hasDT && ch.dt != dt {
 				return nil, wrapf("read", opath, ErrCorrupt, "data type changed from %s to %s", ch.dt, dt)
 			}
@@ -783,6 +807,28 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 			// The index persists even when this segment has no raw bytes, so a
 			// later raw-only segment can use it.
 			ch.idx = rawIndex{known: true, dt: dt, n: n, total: total}
+		} else if mode == idxDAQmx {
+			if ch == nil {
+				return nil, wrap("read", opath, fmt.Errorf("%w: raw data on non-channel", ErrCorrupt))
+			}
+			if ch.idx.known && ch.idx.daqmx == nil && ch.hasDT {
+				return nil, wrap("read", opath, fmt.Errorf("%w: channel changed from a standard index to DAQmx raw data", ErrCorrupt))
+			}
+			if ch.daqmx != nil && !sameDAQmxLayout(ch.daqmx.spec, spec) {
+				return nil, wrap("read", opath, fmt.Errorf("%w: DAQmx raw index changed", ErrCorrupt))
+			}
+			dt := spec.scalers[spec.primary].dt
+			if ch.hasDT && ch.dt != dt {
+				return nil, wrapf("read", opath, ErrCorrupt, "data type changed from %s to %s", ch.dt, dt)
+			}
+			ch.dt = dt
+			ch.hasDT = true
+			ch.idx = rawIndex{known: true, dt: dt, n: spec.n, daqmx: spec}
+			if ch.daqmx == nil {
+				ch.daqmx = newDAQmxState(spec)
+			} else {
+				ch.daqmx.spec = spec
+			}
 		} else if mode == idxMatch {
 			if ch != nil {
 				if !ch.idx.known {
@@ -843,27 +889,31 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 	return compact, nil
 }
 
-func (d *decoder) rawHeader() (int, []byte, error) {
+func (d *decoder) rawHeader() (int, []byte, *daqmxSpec, error) {
 	h, err := d.u32()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	switch h {
 	case RawIndexNoData:
-		return idxNone, nil, nil
+		return idxNone, nil, nil, nil
 	case RawIndexMatchesPrevious:
-		return idxMatch, nil, nil
+		return idxMatch, nil, nil, nil
 	case RawIndexDAQmxFormatChanging, RawIndexDAQmxDigitalLine, RawIndexDAQmxDigitalObserved:
-		return 0, nil, ErrDAQmx
+		spec, err := d.daqmxIndex(h)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		return idxDAQmx, nil, spec, nil
 	}
 	if h < 20 {
-		return 0, nil, fmt.Errorf("%w: raw-data index length %d", ErrCorrupt, h)
+		return 0, nil, nil, fmt.Errorf("%w: raw-data index length %d", ErrCorrupt, h)
 	}
 	body, err := d.bytes(int(h - 4))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	return idxFull, body, nil
+	return idxFull, body, nil, nil
 }
 
 func parseFullIndex(body []byte, bo binary.ByteOrder) (DataType, int64, int64, error) {
@@ -945,7 +995,7 @@ func (f *File) slotsFrom(order []string) ([]rawSlot, error) {
 		if ch == nil || !ch.idx.known || ch.idx.none {
 			return nil, fmt.Errorf("%w: channel %s is in the raw order without an index", ErrCorrupt, p)
 		}
-		slots = append(slots, rawSlot{ch: ch, dt: ch.idx.dt, n: ch.idx.n, total: ch.idx.total})
+		slots = append(slots, rawSlot{ch: ch, dt: ch.idx.dt, n: ch.idx.n, total: ch.idx.total, daqmx: ch.idx.daqmx})
 	}
 	return slots, nil
 }
@@ -955,9 +1005,25 @@ type rawSlot struct {
 	dt    DataType
 	n     int64
 	total int64
+	daqmx *daqmxSpec
 }
 
-func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big, incomplete bool) (unused int64, err error) {
+func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big, incomplete, daqmxTOC bool) (unused int64, err error) {
+	daqN := 0
+	for _, s := range slots {
+		if s.daqmx != nil {
+			daqN++
+		}
+	}
+	if daqmxTOC && daqN == 0 && len(slots) > 0 {
+		return 0, fmt.Errorf("%w: kTocDAQmxRawData set but channels use a standard index", ErrDAQmx)
+	}
+	if daqN > 0 && daqN != len(slots) {
+		return 0, fmt.Errorf("%w: segment mixes DAQmx and standard channels", ErrDAQmx)
+	}
+	if daqN > 0 {
+		return f.addDAQmxSpans(slots, dataPos, rawLen, big, incomplete)
+	}
 	if len(slots) == 0 {
 		if rawLen != 0 {
 			return 0, fmt.Errorf("%w: %d raw bytes but no channels", ErrCorrupt, rawLen)
@@ -1223,9 +1289,15 @@ func (sp *span) copyValues(r io.ReaderAt, start, n int64, dst []byte) error {
 	}
 	if n > 0 {
 		within := start - full
-		return copyStrided(r, sp.partialPos, sp.partialCol, sp.partialStride, within, n, dst[dstOff:], sp.typeSize)
+		if err := copyStrided(r, sp.partialPos, sp.partialCol, sp.partialStride, within, n, dst[dstOff:], sp.typeSize); err != nil {
+			return err
+		}
+		dstOff += int(n) * sp.typeSize
 	}
-	return nil
+	if dstOff < 0 || dstOff > len(dst) {
+		return ErrCorrupt
+	}
+	return sp.maskDigital(dst[:dstOff])
 }
 
 func (sp *span) copyFull(r io.ReaderAt, start, n int64, dst []byte) error {

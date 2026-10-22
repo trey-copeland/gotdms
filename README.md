@@ -10,7 +10,16 @@ The byte layout follows [TDMS File Format Internal Structure](https://www.ni.com
 
 ## Limitations
 
-**DAQmx raw data is rejected, not decoded.** A segment whose table-of-contents has `kTocDAQmxRawData` (bit `0x80`), or whose raw-data index is `0x1269`, `0x1369`, or `0x126A`, returns `ErrDAQmx`. Format-changing scalers and digital scalers are not applied. A large share of NI logging uses DAQmx scaling, and those files do not open with this package.
+**DAQmx raw data is decoded for the layouts NI hardware writes, and rejected otherwise.** A segment whose table-of-contents has `kTocDAQmxRawData` (bit `0x80`), including a file whose first segment sets that bit, is read when each channel's raw-data index is one of the three words below. `Values`, `Slice`, `Cursor`, `ReadValues`, and `Float64s` return the primary scaler's raw samples in its native type (`int8` through `float64`, and `Timestamp`). A digital-line scaler returns `[]uint8` of 0 and 1. Nothing is scaled unless the caller uses `DAQmxScaledFloat64s` or `ApplyDAQmxScale`.
+
+Supported index words, as a little-endian `uint32`:
+
+- `0x00001269` and `0x00001369` are format-changing scalers. Each scaler is five `uint32` fields: DAQmx data type, raw buffer index, byte offset, sample-format bitmap, scale id. The NI article calls `0x00001369` a digital-line scaler. This package reads it as a format-changing scaler, which is the layout those bytes carry.
+- `0x0000126A` is the digital-line scaler used by NI DAQ files. The fields are three `uint32` values (type, raw buffer index, bit offset), one bitmap byte, and a `uint32` scale id. Bit 0 is the least significant bit of byte 0 of the stride.
+
+The raw section is one or more raw buffers concatenated in each chunk. A buffer's stride is its raw-data width. Channels that share a buffer are interleaved at their byte offsets. Buffers may contain different numbers of samples. The data-type word inside the index is `0xFFFFFFFF`. The sample-format bitmap must be 0.
+
+Still `ErrDAQmx`: a non-zero bitmap, a data-type word other than `0xFFFFFFFF`, an unknown DAQmx type code, a digital scaler whose type is not an integer, a raw buffer no scaler references, `kTocDAQmxRawData` on a segment whose channels use a standard index, a segment that mixes DAQmx and standard channels, and a standard index whose type field is `0xFFFFFFFF`. A channel cannot change between a standard index and a DAQmx index. Thermocouple, RTD, table, strain, and add/subtract scales stay visible as properties and are not applied. This package does not write DAQmx raw data.
 
 **Extended float (`tdsTypeExtendedFloat`, `0x0B`) is spec-derived and unverified against NI.** The article does not give a width. This package uses 10 bytes, the x86 80-bit layout documented by other readers. No LabVIEW file in this repository checks that layout, and npTDMS does not write the type. The width is not changed on speculation.
 
@@ -176,6 +185,8 @@ t1, _ := wf.TimeAt(1) // 2024-06-01T12:00:00.001Z
 | `WaveformHeader` | t0, dt, unit, and `wf_samples` without loading Y. `TimeAt` timestamps cursor batches. |
 | `DataType` | NI `tdsDataType` codes. `String`, `Size`. |
 | `Property`, `Timestamp`, `Extended`, `LinearScale` | Values and conversions. |
+| `Channel.DAQmx`, `DAQmxSlice` | DAQmx raw-data index, and one scaler's raw samples by scale id. |
+| `DAQmxScaling`, `DAQmxScaledFloat64s`, `ApplyDAQmxScale` | `NI_Scale` metadata. Linear and polynomial chains apply only through these calls. |
 | `WithReadBuffer` | Sequential buffer for `Cursor` (default 256 KiB). `Values` stays on `ReadAt`. |
 | `Channel.ChunkStats` | Count, min, max, mean, and RMS per chunk of a numeric channel, one Cursor pass. |
 | `File.Status` | Clean end, an incomplete final segment, or (`WithLenientTail`) a truncated final segment, plus any short tail. |
@@ -215,7 +226,7 @@ A channel that has never had a raw-data index has no type on disk (`DataType` is
 | Float with unit `0x19`, `0x1A`, `0x1B` | numeric value; unit is the `unit_string` property, not an inline unit id | same |
 | Extended float (`0x0B`) | 10-byte x86 80-bit, spec-derived, no NI fixture; `Float64` is best-effort | yes, as `[]Extended` |
 | Complex float `0x08000c`, `0x10000d` | yes | yes |
-| DAQmx raw data (ToC bit `0x80`, index `0x1269`, `0x1369`, or `0x126A`) | error `ErrDAQmx` | not written |
+| DAQmx raw data (`0x1269` and `0x1369` format-changing, `0x126A` digital lines) | yes, raw native values; linear and polynomial scales are opt-in. Other layouts return `ErrDAQmx` | not written |
 | Fixed-point `0x4F` | error `ErrUnsupported` | not written |
 | `*.tdms_index` (`TDSh`) | error `ErrIndexFile` | not written |
 | Incomplete last segment (`next` offset all `0xFF`) | yes, whole values that are present; `File.Status` reports it | sentinel used only until `Flush` patches it |
@@ -233,7 +244,7 @@ A few details in the article are ambiguous. Each choice is tested.
 
 **String channels.** The article says the raw block starts with "the offset of the first character of each string". Files written by LabVIEW, and the readers that open them (npTDMS, the Rust `tdms` crate), store the cumulative *end* offset of each string instead, with an implicit start of zero. Empty strings repeat the previous end offset. The total-size field in the index is `4*N +` the UTF-8 byte count. This package reads and writes that end-offset table. Property strings are different: a `uint32` byte length followed by the bytes, which is what the article specifies for every string that is not channel raw data.
 
-**DAQmx.** The article's format-changing scaler index is the bytes `69 12 00 00`, little-endian `0x00001269` (decimal 4713, the same number as the version, in a different field). The digital-line scaler is documented as `69 13 00 00` (`0x00001369`). npTDMS reports that NI-produced files use `6A 12 00 00` (`0x0000126A`) instead, and that `0x1369` does not appear. There is no `0x12C9` (decimal 4809) in the article. All three markers, and the `kTocDAQmxRawData` bit, return `ErrDAQmx`. Format-changing and digital scalers are not decoded.
+**DAQmx.** The format-changing scaler index is the bytes `69 12 00 00`, little-endian `0x00001269` (decimal 4713, the same number as the version, in a different field). `69 13 00 00` (`0x00001369`) is the same five-field scaler. The NI article calls `0x00001369` a digital-line scaler; the digital-line layout in NI DAQ files is `6A 12 00 00` (`0x0000126A`), three `uint32` fields, one bitmap byte, and a scale id. There is no `0x12C9` (decimal 4809) in the article. The raw-data index is not a length-prefixed standard index: the first word is the marker, then data type `0xFFFFFFFF`, dimension 1, chunk size, the scaler vector, and the raw-data width vector. Within a chunk the raw buffers are concatenated. A buffer holds `(samples in that buffer) * width` bytes, and a channel's value starts at its byte offset in each stride. A digital scaler's offset is a bit index. Reads return those raw values. `DAQmxScaledFloat64s` and `ApplyDAQmxScale` apply a linear or polynomial chain (`y = slope*x + intercept`, or `y = sum(coeff[j] * x^j)`). When every scale reads raw data, only the highest index is applied. Status `scaled` means the stored samples are already engineering units, so `DAQmxScaledFloat64s` returns the raw float64 values. An input source of 0 names raw data when that index has no scale, which is the article's linear example.
 
 **Extended float.** The article does not give a width. Values are 10 bytes, the x86 80-bit layout other readers document: significand `uint64` (explicit integer bit), then a biased exponent in the low 15 bits of a `uint16` with the sign in bit 15. Little-endian stores significand then exponent. Big-endian stores exponent then significand, each field big-endian. This layout is derived from that description. It has not been checked against a file written by LabVIEW or another NI tool, and npTDMS does not produce the type, so this repository has no NI fixture for it. `Extended.Float64` rounds into float64 and does not preserve a 64-bit significand or a NaN payload. Round-trip `[]Extended` when the bits matter. Subnormals are not synthesized by `ExtendedFromFloat64`.
 
@@ -251,7 +262,7 @@ A few details in the article are ambiguous. Each choice is tested.
 
 ## Errors
 
-Public operations return `*Error` with an operation name and, when there is one, an object or file path. `Unwrap` yields a sentinel (`ErrBadTag`, `ErrTruncated`, `ErrCorrupt`, `ErrDAQmx`, `ErrUnsupported`, `ErrType`, `ErrLayout`, `ErrVersion`, `ErrIndexFile`, `ErrClosed`, `ErrArgument`) or the underlying I/O error. Malformed, truncated, and unknown input returns an error. The reader does not panic on it. `FuzzReader` is the regression target.
+Public operations return `*Error` with an operation name and, when there is one, an object or file path. `Unwrap` yields a sentinel (`ErrBadTag`, `ErrTruncated`, `ErrCorrupt`, `ErrDAQmx`, `ErrUnsupported`, `ErrType`, `ErrLayout`, `ErrVersion`, `ErrIndexFile`, `ErrClosed`, `ErrArgument`) or the underlying I/O error. `ErrDAQmx` means an unsupported DAQmx layout, not the presence of DAQmx data. Malformed, truncated, and unknown input returns an error. The reader does not panic on it. `FuzzReader` is the regression target.
 
 ## Performance
 

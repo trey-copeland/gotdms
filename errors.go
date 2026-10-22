@@ -16,9 +16,13 @@ var (
 	ErrTruncated = errSentinel("truncated TDMS data")
 	// ErrCorrupt means a length, offset, or object path contradicts the TDMS rules.
 	ErrCorrupt = errSentinel("corrupt TDMS structure")
-	// ErrDAQmx means the segment uses DAQmx raw data (ToC bit kTocDAQmxRawData or a
-	// DAQmx raw-data index). Scalers are not decoded.
-	ErrDAQmx = errSentinel("DAQmx raw data is not supported")
+	// ErrDAQmx means a DAQmx raw-data index uses a layout this package does not
+	// decode. Supported format-changing scalers (index words 0x00001269 and
+	// 0x00001369) and digital-line scalers (0x0000126A) are read. A non-zero
+	// sample-format bitmap, an unknown DAQmx type code, a DAQmx index whose
+	// data type is not 0xFFFFFFFF, or kTocDAQmxRawData on a segment whose
+	// channels use a standard index still returns ErrDAQmx.
+	ErrDAQmx = errSentinel("unsupported DAQmx raw data")
 	// ErrUnsupported means a data type or layout this package does not implement,
 	// such as fixed-point (0x4F) or a multi-channel interleaved string segment.
 	ErrUnsupported = errSentinel("unsupported TDMS feature")

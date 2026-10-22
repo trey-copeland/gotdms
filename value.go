@@ -212,6 +212,15 @@ type decoder struct {
 
 func (d *decoder) remain() int { return len(d.b) - d.off }
 
+func (d *decoder) u8() (byte, error) {
+	if d.remain() < 1 {
+		return 0, ErrTruncated
+	}
+	v := d.b[d.off]
+	d.off++
+	return v, nil
+}
+
 func (d *decoder) u32() (uint32, error) {
 	if d.remain() < 4 {
 		return 0, ErrTruncated

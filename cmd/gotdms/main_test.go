@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -186,6 +188,67 @@ func TestConvertEmptyStringAndMissingSample(t *testing.T) {
 	if stdout.String() != want {
 		t.Fatalf("csv:\n%s\nwant:\n%s", stdout.String(), want)
 	}
+}
+
+func TestInfoConvertDAQmx(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hsai.tdms")
+	if err := os.WriteFile(path, daqmxCLIFile(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"info", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("info: %d %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "c (tdsTypeI16, 4 samples):") {
+		t.Fatalf("info:\n%s", stdout.String())
+	}
+	stdout.Reset()
+	if code := run([]string{"convert", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("convert: %d %s", code, stderr.String())
+	}
+	want := "/'g'/'c'\n1\n2\n-1\n-2\n"
+	if stdout.String() != want {
+		t.Fatalf("csv:\n%s\nwant:\n%s", stdout.String(), want)
+	}
+}
+
+func daqmxCLIFile() []byte {
+	var meta []byte
+	put := func(v uint32) {
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], v)
+		meta = append(meta, buf[:]...)
+	}
+	put64 := func(v uint64) {
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], v)
+		meta = append(meta, buf[:]...)
+	}
+	put(1)
+	path := "/'g'/'c'"
+	put(uint32(len(path)))
+	meta = append(meta, path...)
+	put(0x00001269)
+	put(0xFFFFFFFF)
+	put(1)
+	put64(4)
+	put(1)
+	for _, v := range []uint32{3, 0, 0, 0, 0} {
+		put(v)
+	}
+	put(1)
+	put(2)
+	put(0)
+	raw := []byte{0x01, 0x00, 0x02, 0x00, 0xFF, 0xFF, 0xFE, 0xFF}
+	file := make([]byte, 28, 28+len(meta)+len(raw))
+	copy(file[0:4], "TDSm")
+	binary.LittleEndian.PutUint32(file[4:8], 1<<1|1<<2|1<<3|1<<7)
+	binary.LittleEndian.PutUint32(file[8:12], 4713)
+	binary.LittleEndian.PutUint64(file[12:20], uint64(len(meta)+len(raw)))
+	binary.LittleEndian.PutUint64(file[20:28], uint64(len(meta)))
+	file = append(file, meta...)
+	return append(file, raw...)
 }
 
 func TestCLIUsage(t *testing.T) {

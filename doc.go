@@ -66,8 +66,11 @@
 // lead-in. A short stream is not patched into a finished segment.
 //
 // Files are little-endian, version 4713 (TDMS 2.0). Big-endian segments are
-// accepted on read. DAQmx raw data is detected and rejected with ErrDAQmx
-// rather than decoded.
+// accepted on read. DAQmx raw data (kTocDAQmxRawData, index words 0x00001269,
+// 0x00001369, and 0x0000126A) is decoded to the scaler's native type. Values
+// stay raw; NI_Scale linear and polynomial chains are applied only by
+// DAQmxScaledFloat64s and ApplyDAQmxScale. A layout this package does not
+// decode returns ErrDAQmx.
 //
 // Sets of files are the dataset subpackage
 // (github.com/trey-copeland/gotdms/dataset). The caller declares the timestamp

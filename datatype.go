@@ -35,8 +35,11 @@ const (
 	TypeComplex64 DataType = 0x08000c
 	// TypeComplex128 is two little-endian float64 values, real then imaginary.
 	TypeComplex128 DataType = 0x10000d
-	// TypeDAQmxRaw is the in-index data-type marker 0xFFFFFFFF used inside a
-	// DAQmx raw-data index. Seeing it returns ErrDAQmx.
+	// TypeDAQmxRaw is the data-type word 0xFFFFFFFF inside a DAQmx raw-data
+	// index. It marks the index, not the samples. The channel's DataType after
+	// a successful read is the scaler's native type. A property value of this
+	// type, or a standard raw-data index whose type word is 0xFFFFFFFF, still
+	// returns ErrDAQmx.
 	TypeDAQmxRaw DataType = 0xFFFFFFFF
 )
 

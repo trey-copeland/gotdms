@@ -47,6 +47,10 @@ func FuzzReader(f *testing.F) {
 		}
 		return b.Write([]float64{0.5, 1.5, 2.5})
 	})
+	f.Add(daqmxSeedFormatChanging())
+	f.Add(daqmxSeedFormatChangingAlt())
+	f.Add(daqmxSeedDigital())
+	f.Add(daqmxSeedMultiBuffer())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		file, err := NewReader(bytes.NewReader(data))
