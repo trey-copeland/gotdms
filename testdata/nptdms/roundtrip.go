@@ -24,6 +24,10 @@ type chDoc struct {
 	Name   string `json:"name"`
 	Type   string `json:"type"`
 	Values []any  `json:"values"`
+	// Scaled is DAQmxScaledFloat64s for a DAQmx channel. ScaledError is
+	// set instead when that call fails.
+	Scaled      []float64 `json:"scaled,omitempty"`
+	ScaledError string    `json:"scaled_error,omitempty"`
 }
 
 func main() {
@@ -230,9 +234,17 @@ func readOne(path string) (fileDoc, error) {
 			if err != nil {
 				return fileDoc{}, err
 			}
-			doc.Channels = append(doc.Channels, chDoc{
+			cd := chDoc{
 				Group: g.Name(), Name: ch.Name(), Type: ch.DataType().String(), Values: vals,
-			})
+			}
+			if _, ok := ch.DAQmx(); ok {
+				if sc, err := ch.DAQmxScaledFloat64s(); err != nil {
+					cd.ScaledError = err.Error()
+				} else {
+					cd.Scaled = sc
+				}
+			}
+			doc.Channels = append(doc.Channels, cd)
 		}
 	}
 	if doc.Channels == nil {

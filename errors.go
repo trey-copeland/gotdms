@@ -20,8 +20,8 @@ var (
 	// decode. Supported format-changing scalers (index words 0x00001269 and
 	// 0x00001369) and digital-line scalers (0x0000126A) are read. A non-zero
 	// sample-format bitmap, an unknown DAQmx type code, a DAQmx index whose
-	// data type is not 0xFFFFFFFF, or kTocDAQmxRawData on a segment whose
-	// channels use a standard index still returns ErrDAQmx.
+	// data type is neither 0xFFFFFFFF nor its one scaler's type, or a segment
+	// that mixes DAQmx and standard channels still returns ErrDAQmx.
 	ErrDAQmx = errSentinel("unsupported DAQmx raw data")
 	// ErrUnsupported means a data type or layout this package does not implement,
 	// such as fixed-point (0x4F) or a multi-channel interleaved string segment.

@@ -2,6 +2,7 @@ package tdms
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +52,11 @@ func FuzzReader(f *testing.F) {
 	f.Add(daqmxSeedFormatChangingAlt())
 	f.Add(daqmxSeedDigital())
 	f.Add(daqmxSeedMultiBuffer())
+	f.Add(daqmxSeedTyped())
+	f.Add(daqmxSeedScaled())
+	f.Add(multiChunkTwoBuffers())
+	f.Add(widenedFile())
+	f.Add(daqmxSeedPartialTwoBuffers())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		file, err := NewReader(bytes.NewReader(data))
@@ -74,7 +80,14 @@ func FuzzReader(f *testing.F) {
 					_ = cur.Values()
 				}
 				_ = cur.Err()
+				if info, ok := ch.DAQmx(); ok {
+					for _, sc := range info.Scalers {
+						_, _ = ch.DAQmxSlice(sc.ScaleID, 0, ch.Len())
+					}
+					_, _ = ch.DAQmxScaledFloat64s()
+				}
 			}
+			_, _ = g.Values()
 		}
 	})
 }
@@ -113,6 +126,25 @@ func FuzzSegmentIndex(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(blob)
+	// A sidecar with DAQmx blocks: two raw buffers, a digital line, and a
+	// width change between segments.
+	for i, file := range [][]byte{multiChunkTwoBuffers(), daqmxSeedDigital(), widenedFile()} {
+		dpath := filepath.Join(dir, fmt.Sprintf("daq%d.tdms", i))
+		if err := os.WriteFile(dpath, file, 0o644); err != nil {
+			f.Fatal(err)
+		}
+		dside := SegmentIndexPath(dpath)
+		df, err := Open(dpath, WithSegmentIndex(dside))
+		if err != nil {
+			f.Fatal(err)
+		}
+		df.Close()
+		dblob, err := os.ReadFile(dside)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(dblob)
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 1<<16 {

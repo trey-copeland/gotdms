@@ -37,8 +37,9 @@ const (
 	// TocBigEndian means numeric fields are big-endian. The ToC mask itself stays little-endian.
 	TocBigEndian uint32 = 1 << 6
 	// TocDAQmxRawData means the raw-data section is DAQmx raw buffers rather than
-	// one standard block per channel. Format-changing and digital-line indexes
-	// in that section are decoded. A standard index under this flag returns ErrDAQmx.
+	// one standard block per channel. The raw-data index words decide the
+	// layout, as in npTDMS: DAQmx indexes are decoded with or without this
+	// bit, and standard indexes under it are read as standard data.
 	TocDAQmxRawData uint32 = 1 << 7
 
 	// RawIndexNoData is stored in place of a raw-data index when the object has
@@ -52,8 +53,10 @@ const (
 	// but it occupies the index-length field rather than the version field.
 	RawIndexDAQmxFormatChanging uint32 = 0x00001269
 	// RawIndexDAQmxDigitalLine is bytes 69 13 00 00. The NI article calls this a
-	// digital-line scaler. The layout read for this word is the format-changing
-	// scaler (the same five uint32 fields as RawIndexDAQmxFormatChanging).
+	// digital-line scaler. npTDMS does not accept this word and no NI file in
+	// this repository uses it. This package reads it as a format-changing
+	// scaler (the same five uint32 fields as RawIndexDAQmxFormatChanging); that
+	// is an assumption, and a record of another shape fails its bounds checks.
 	// Digital-line scalers in NI-produced files use RawIndexDAQmxDigitalObserved.
 	// The article does not mention 0x12C9 (decimal 4809); that word is not a
 	// DAQmx header here.

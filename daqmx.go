@@ -2,6 +2,7 @@ package tdms
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -73,6 +74,10 @@ type DAQmxScaler struct {
 // Float64s decode. It is the only scaler, or the first scaler whose ScaleID
 // is 0, or otherwise the scaler with the lowest ScaleID. DAQmxSlice reads
 // any scaler by ScaleID.
+//
+// When segments differ, this is the most recent segment's index. Widths,
+// buffer indexes, and byte offsets may change between segments; the scaler
+// count, scale ids, and types may not.
 type DAQmxRaw struct {
 	Header  uint32
 	Widths  []uint32
@@ -83,10 +88,11 @@ type DAQmxRaw struct {
 // DAQmxScale is one NI_Scale[i] description stored in properties.
 //
 // InputSource is the scale index this scale reads, or 0 when the property is
-// absent. InputRaw is true when the input is the raw samples: the input
-// property is missing, it is 0xFFFFFFFF, or it does not name a scale in this
-// set. The NI article's linear example uses input source 0 with no NI_Scale[0],
-// which is raw.
+// absent. InputRaw is true when the input is not another typed scale: the
+// input property is missing, it is 0xFFFFFFFF, or it names an index with no
+// NI_Scale type. DAQmxScaledFloat64s reads that last case as the DAQmx
+// scaler whose ScaleID is InputSource; ApplyDAQmxScale reads it as raw. The
+// NI article's linear example uses input source 0 with no NI_Scale[0].
 //
 // Linear uses Slope and Intercept (y = Slope*x + Intercept). Polynomial uses
 // Coefficients, lowest degree first, so Coefficients[0] is the constant term.
@@ -109,10 +115,16 @@ type DAQmxScale struct {
 //
 // Status is NI_Scaling_Status ("unscaled", "scaled", or empty). Source is
 // "channel", "group", or "file", the object whose properties supplied the
-// scales. Channel properties win, then the group, then the file.
+// scales. Channel properties win, then the group, then the file. Count is
+// NI_Number_Of_Scales, or 0 when that property is absent.
+//
+// Scales holds only the indexes that have an NI_Scale[i]_Scale_Type. An index
+// below Count with no type is the DAQmx scaler whose ScaleID is that index:
+// its raw samples are that scale's output.
 type DAQmxScaling struct {
 	Status string
 	Source string
+	Count  int
 	Scales []DAQmxScale
 }
 
@@ -182,117 +194,155 @@ func (c *Channel) DAQmxScaling() DAQmxScaling {
 	if source == "" {
 		return DAQmxScaling{}
 	}
+	count := 0
+	if n, ok := propUint(props, "NI_Number_Of_Scales"); ok && n <= math.MaxInt32 {
+		count = int(n)
+	}
 	return DAQmxScaling{
 		Status: scalingStatus(props),
 		Source: source,
+		Count:  count,
 		Scales: parseDAQmxScales(props),
 	}
 }
 
-// DAQmxScaledFloat64s reads the primary scaler as float64 and, when the
-// scaling status is not "scaled" and a linear or polynomial chain is present,
-// applies that chain. Status "scaled" means the stored samples are already
-// in engineering units, so the raw float64 values are returned unchanged.
-// No scales is the same: the raw values. A chain this package does not apply
+// DAQmxScaledFloat64s returns the channel's output scale as float64, which
+// is what npTDMS returns for a scaled DAQmx channel.
+//
+// The output is the last scale: index Count-1 when NI_Number_Of_Scales is
+// present, otherwise the highest NI_Scale index with a type. A Linear or
+// Polynomial scale is applied to its input source, which is computed the same
+// way. An input of 0xFFFFFFFF, or a missing input property, is the primary
+// scaler's raw samples. An index with no scale type is the DAQmx scaler with
+// that ScaleID; a channel with one scaler uses that scaler. Status "scaled"
+// means the samples are already in engineering units, so the raw float64
+// values are returned. No scales is the same: the raw values. A chain that
+// needs another scale type, or a DAQmx scaler the channel does not have,
 // returns ErrUnsupported and does not change what Values returns.
 func (c *Channel) DAQmxScaledFloat64s() ([]float64, error) {
-	raw, err := c.Float64s()
-	if err != nil {
-		return nil, err
-	}
 	sc := c.DAQmxScaling()
-	if strings.EqualFold(sc.Status, "scaled") || len(sc.Scales) == 0 {
-		return raw, nil
-	}
-	return ApplyDAQmxScale(sc.Scales, raw)
-}
-
-// ApplyDAQmxScale applies a linear and polynomial chain to raw.
-//
-// Every scale whose input is raw, and no scale that reads another scale, is
-// the "all raw inputs" case: only the highest index is applied. Otherwise the
-// unique terminal scale (the scale no other scale reads) is applied after the
-// scales it depends on, back to raw. Two terminal scales, a cycle, or a scale
-// type other than Linear or Polynomial returns ErrUnsupported. The input
-// slice is not modified.
-func ApplyDAQmxScale(scales []DAQmxScale, raw []float64) ([]float64, error) {
-	out := make([]float64, len(raw))
-	copy(out, raw)
-	if len(scales) == 0 || len(out) == 0 {
-		return out, nil
-	}
-	chain, err := daqmxChain(scales)
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range chain {
-		if err := applyDAQmxScale(&s, out); err != nil {
-			return nil, err
+	final := -1
+	if sc.Count > 0 {
+		final = sc.Count - 1
+	} else {
+		for _, s := range sc.Scales {
+			if s.Index > final {
+				final = s.Index
+			}
 		}
+	}
+	if strings.EqualFold(sc.Status, "scaled") || final < 0 {
+		return c.Float64s()
+	}
+	out, err := evalDAQmxScales(sc.Scales, final, c.daqmxScaleInput)
+	if err != nil {
+		return nil, wrap("read", c.path, err)
 	}
 	return out, nil
 }
 
-func daqmxChain(scales []DAQmxScale) ([]DAQmxScale, error) {
-	allRaw := true
+// daqmxScaleInput is the input a scale chain reads at its leaves. named is
+// false for raw data (0xFFFFFFFF or no input property); otherwise id is a
+// scale index with no NI_Scale type, which is a DAQmx scaler's ScaleID.
+func (c *Channel) daqmxScaleInput(id uint32, named bool) ([]float64, error) {
+	if !named || id == 0xFFFFFFFF || c.daqmx == nil || c.daqmx.spec == nil {
+		return c.Float64s()
+	}
+	scalers := c.daqmx.spec.scalers
+	for i := range scalers {
+		if scalers[i].scaleID != id {
+			continue
+		}
+		idx, err := scalerIndex(scalers, id)
+		if err != nil {
+			return nil, err
+		}
+		if idx == c.daqmx.spec.primary {
+			return c.Float64s()
+		}
+		total := c.daqmx.totals[idx]
+		if total > int64(math.MaxInt) {
+			return nil, fmt.Errorf("%w: scaler %d has %d values", ErrUnsupported, id, total)
+		}
+		v, err := c.DAQmxSlice(id, 0, int(total))
+		if err != nil {
+			return nil, err
+		}
+		return toFloat64s(v)
+	}
+	if len(scalers) == 1 {
+		// The NI article's linear example reads input 0 with no NI_Scale[0]
+		// on a channel whose one scaler may use another id.
+		return c.Float64s()
+	}
+	return nil, fmt.Errorf("%w: DAQmx scale input %d names no scaler on this channel", ErrUnsupported, id)
+}
+
+// ApplyDAQmxScale applies a linear and polynomial chain to raw.
+//
+// The output is the scale with the highest Index. Each scale is applied to
+// its input: raw when InputRaw is set, otherwise the scale whose Index is
+// InputSource, computed the same way. An InputSource that names no scale in
+// scales is raw. A cycle, a duplicate Index, or a scale type other than
+// Linear or Polynomial returns an error. The input slice is not modified.
+func ApplyDAQmxScale(scales []DAQmxScale, raw []float64) ([]float64, error) {
+	if len(scales) == 0 {
+		return append([]float64{}, raw...), nil
+	}
+	final := scales[0].Index
+	for _, s := range scales[1:] {
+		if s.Index > final {
+			final = s.Index
+		}
+	}
+	return evalDAQmxScales(scales, final, func(uint32, bool) ([]float64, error) {
+		return raw, nil
+	})
+}
+
+// evalDAQmxScales computes scale index final. input supplies the leaves and
+// its result is not modified.
+func evalDAQmxScales(scales []DAQmxScale, final int, input func(id uint32, named bool) ([]float64, error)) ([]float64, error) {
+	by := make(map[int]*DAQmxScale, len(scales))
 	for i := range scales {
-		if !scales[i].InputRaw {
-			allRaw = false
-			break
+		if _, ok := by[scales[i].Index]; ok {
+			return nil, fmt.Errorf("%w: duplicate NI_Scale[%d]", ErrCorrupt, scales[i].Index)
 		}
+		by[scales[i].Index] = &scales[i]
 	}
-	if allRaw {
-		best := scales[0]
-		for _, s := range scales[1:] {
-			if s.Index >= best.Index {
-				best = s
-			}
-		}
-		return []DAQmxScale{best}, nil
-	}
-	by := make(map[int]DAQmxScale, len(scales))
-	referenced := map[int]bool{}
-	for _, s := range scales {
-		if _, ok := by[s.Index]; ok {
-			return nil, fmt.Errorf("%w: duplicate NI_Scale[%d]", ErrCorrupt, s.Index)
-		}
-		by[s.Index] = s
-		if !s.InputRaw {
-			referenced[int(s.InputSource)] = true
-		}
-	}
-	var terminals []DAQmxScale
-	for _, s := range scales {
-		if !referenced[s.Index] {
-			terminals = append(terminals, s)
-		}
-	}
-	if len(terminals) != 1 {
-		return nil, fmt.Errorf("%w: DAQmx scale chain has %d terminal scales", ErrUnsupported, len(terminals))
-	}
-	var rev []DAQmxScale
-	seen := map[int]bool{}
-	cur := terminals[0]
-	for {
-		if seen[cur.Index] {
-			return nil, fmt.Errorf("%w: DAQmx scale %d is part of a cycle", ErrCorrupt, cur.Index)
-		}
-		seen[cur.Index] = true
-		rev = append(rev, cur)
-		if cur.InputRaw {
-			break
-		}
-		next, ok := by[int(cur.InputSource)]
+	seen := make(map[int]bool, len(scales))
+	var eval func(idx int) ([]float64, error)
+	eval = func(idx int) ([]float64, error) {
+		s, ok := by[idx]
 		if !ok {
-			break
+			return input(uint32(idx), true)
 		}
-		cur = next
+		if seen[idx] {
+			return nil, fmt.Errorf("%w: DAQmx scale %d is part of a cycle", ErrCorrupt, idx)
+		}
+		seen[idx] = true
+		var in []float64
+		var err error
+		switch {
+		case s.InputRaw && (!s.hasInput || s.InputSource == 0xFFFFFFFF):
+			in, err = input(0xFFFFFFFF, false)
+		case s.InputRaw:
+			in, err = input(s.InputSource, true)
+		case s.InputSource == 0xFFFFFFFF || uint64(s.InputSource) > uint64(math.MaxInt32):
+			in, err = input(0xFFFFFFFF, false)
+		default:
+			in, err = eval(int(s.InputSource))
+		}
+		if err != nil {
+			return nil, err
+		}
+		out := append([]float64{}, in...)
+		if err := applyDAQmxScale(s, out); err != nil {
+			return nil, err
+		}
+		return out, nil
 	}
-	chain := make([]DAQmxScale, len(rev))
-	for i := range rev {
-		chain[i] = rev[len(rev)-1-i]
-	}
-	return chain, nil
+	return eval(final)
 }
 
 func applyDAQmxScale(s *DAQmxScale, buf []float64) error {
@@ -473,8 +523,14 @@ func (d *decoder) daqmxIndex(header uint32) (*daqmxSpec, error) {
 	if err != nil {
 		return nil, err
 	}
-	if DataType(code) != TypeDAQmxRaw {
-		return nil, fmt.Errorf("%w: DAQmx index data type %#x is not 0xFFFFFFFF", ErrDAQmx, code)
+	// The data type is normally 0xFFFFFFFF. npTDMS also reads an index whose
+	// data type is the scaler's own type, with exactly one scaler; that is
+	// checked after the scalers are read.
+	typed := DataType(code) != TypeDAQmxRaw
+	if typed {
+		if sz, ok := DataType(code).Size(); !ok || sz <= 0 {
+			return nil, fmt.Errorf("%w: DAQmx index data type %#x", ErrDAQmx, code)
+		}
 	}
 	dim, err := d.u32()
 	if err != nil {
@@ -512,6 +568,14 @@ func (d *decoder) daqmxIndex(header uint32) (*daqmxSpec, error) {
 			return nil, err
 		}
 		scalers[i] = sc
+	}
+	if typed {
+		if ns != 1 {
+			return nil, fmt.Errorf("%w: DAQmx index data type %s with %d scalers", ErrDAQmx, DataType(code), ns)
+		}
+		if native, _ := daqmxType(scalers[0].rawType); native != DataType(code) {
+			return nil, fmt.Errorf("%w: DAQmx index data type %s, scaler type %s", ErrDAQmx, DataType(code), native)
+		}
 	}
 	nw, err := d.u32()
 	if err != nil {
@@ -655,17 +719,18 @@ func scalerIndex(scalers []daqmxScaler, id uint32) (int, error) {
 	return found, nil
 }
 
-func sameDAQmxLayout(a, b *daqmxSpec) bool {
-	if a == nil || b == nil || a.header != b.header || a.primary != b.primary || len(a.widths) != len(b.widths) || len(a.scalers) != len(b.scalers) {
+// sameDAQmxScalers reports whether b continues a: the same scalers, in the
+// same order, with the same scale ids and native types. Raw buffer widths,
+// buffer indexes, and byte offsets may change between segments, for example
+// when a later acquisition adds a channel to the buffer. Each span records
+// its own stride and column, so earlier segments keep their layout.
+func sameDAQmxScalers(a, b *daqmxSpec) bool {
+	if a == nil || b == nil || a.primary != b.primary || len(a.scalers) != len(b.scalers) {
 		return false
 	}
-	for i := range a.widths {
-		if a.widths[i] != b.widths[i] {
-			return false
-		}
-	}
 	for i := range a.scalers {
-		if a.scalers[i] != b.scalers[i] {
+		x, y := a.scalers[i], b.scalers[i]
+		if x.dt != y.dt || x.scaleID != y.scaleID || x.digital != y.digital {
 			return false
 		}
 	}
@@ -901,7 +966,7 @@ func (w *ixw) daqmxBlock(st *daqmxState) {
 	}
 }
 
-func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64) (*daqmxState, error) {
+func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT DataType) (*daqmxState, error) {
 	header, err := r.u32()
 	if err != nil {
 		return nil, err
@@ -989,9 +1054,15 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64) (*daqmxState, 
 		if digital {
 			sc.dt = TypeUint8
 		}
+		// A sidecar is a cache: a scaler type that has no fixed width, or a
+		// span that disagrees with its scaler, is a miss rather than a read.
+		sz, ok := sc.dt.Size()
+		if !ok || sz <= 0 || (!digital && uint64(offset)+uint64(sz) > uint64(widths[buffer])) {
+			return nil, errIndex
+		}
 		spec.scalers[i] = sc
 		if primary {
-			if spec.primary >= 0 {
+			if spec.primary >= 0 || sc.dt != primaryDT || !spansMatch(primarySpans, sz, digital) {
 				return nil, errIndex
 			}
 			spec.primary = i
@@ -1014,6 +1085,9 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64) (*daqmxState, 
 		if err != nil {
 			return nil, err
 		}
+		if !spansMatch(spans, sz, digital) {
+			return nil, errIndex
+		}
 		got, err := spanTotal(spans)
 		if err != nil || got != total {
 			return nil, errIndex
@@ -1025,6 +1099,15 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64) (*daqmxState, 
 		return nil, errIndex
 	}
 	return st, nil
+}
+
+func spansMatch(spans []span, size int, digital bool) bool {
+	for i := range spans {
+		if spans[i].str || spans[i].typeSize != size || spans[i].digital != digital {
+			return false
+		}
+	}
+	return true
 }
 
 func (sp *span) maskDigital(dst []byte) error {

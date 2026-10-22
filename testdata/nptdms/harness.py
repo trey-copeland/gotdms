@@ -25,6 +25,7 @@ from nptdms.test.test_daqmx import (
 )
 from nptdms.test.util import (
     GeneratedFile,
+    channel_metadata,
     channel_metadata_with_repeated_structure,
     group_metadata,
     hexlify_value,
@@ -337,6 +338,114 @@ def daqmx_oracle():
         scaled_got = got["scaled.tdms"]["channels"][0]["values"]
         if scaled_got != [1.0, 2.0, 3.0]:
             raise SystemExit(f"gotdms scaled file returned {scaled_got}, want raw [1, 2, 3]")
+    daqmx_layout_oracle()
+    daqmx_scale_oracle()
+
+
+def daqmx_layout_oracle():
+    """Layouts npTDMS reads that a stricter reader could reject.
+
+    typed: the DAQmx index data type is the scaler's type (tdsTypeI16) rather
+    than 0xFFFFFFFF. stdflag: standard indexes in a segment that sets
+    kTocDAQmxRawData. widen: a second segment adds a channel to the buffer,
+    so the first channel's stride and the width vector change.
+    """
+    i16 = daqmx_scaler_metadata(0, 3, 0)
+    typed = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 2, [2], [i16], data_type=2),
+    )
+    stdflag = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        channel_metadata("/'Group'/'Channel1'", 2, 2),
+    )
+    first = segment_objects_metadata(
+        root_metadata(),
+        group_metadata(),
+        daqmx_channel_metadata("Channel1", 2, [2], [i16]),
+    )
+    wider = segment_objects_metadata(
+        daqmx_channel_metadata("Channel1", 2, [4], [i16]),
+        daqmx_channel_metadata("Channel2", 2, [4], [daqmx_scaler_metadata(0, 3, 2)]),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        write_generated(os.path.join(tmp, "typed.tdms"), [(segment_toc(), typed, "07 00 08 00")])
+        write_generated(os.path.join(tmp, "stdflag.tdms"), [(segment_toc(), stdflag, "07 00 08 00")])
+        write_generated(
+            os.path.join(tmp, "widen.tdms"),
+            [
+                (segment_toc(), first, "01 00 02 00"),
+                (segment_toc(), wider, "03 00 1E 00 04 00 28 00"),
+            ],
+        )
+        got = go_read(tmp)
+        for name in ("typed.tdms", "stdflag.tdms", "widen.tdms"):
+            compare_raw(got[name], np_raw_doc(os.path.join(tmp, name)), f"daqmx layout {name}")
+
+
+def daqmx_scale_oracle():
+    """gotdms DAQmxScaledFloat64s against npTDMS channel[:] (scaled).
+
+    An NI_Scale index with no Scale_Type is the DAQmx scaler with that scale
+    id, the output is index NI_Number_Of_Scales - 1, and each scale reads its
+    input source.
+    """
+    def lin(i, slope, icept, src):
+        return {
+            f"NI_Scale[{i}]_Scale_Type": str_prop("Linear"),
+            f"NI_Scale[{i}]_Linear_Slope": f64_prop(slope),
+            f"NI_Scale[{i}]_Linear_Y_Intercept": f64_prop(icept),
+            f"NI_Scale[{i}]_Linear_Input_Source": u32_prop(src),
+        }
+
+    def poly(i, coeffs, src):
+        p = {
+            f"NI_Scale[{i}]_Scale_Type": str_prop("Polynomial"),
+            f"NI_Scale[{i}]_Polynomial_Coefficients_Size": u32_prop(len(coeffs)),
+            f"NI_Scale[{i}]_Polynomial_Input_Source": u32_prop(src),
+        }
+        for j, c in enumerate(coeffs):
+            p[f"NI_Scale[{i}]_Polynomial_Coefficients[{j}]"] = f64_prop(c)
+        return p
+
+    def count(n):
+        return {"NI_Number_Of_Scales": u32_prop(n), "NI_Scaling_Status": str_prop("unscaled")}
+
+    one = [daqmx_scaler_metadata(0, 3, 0)]
+    two = [daqmx_scaler_metadata(0, 3, 0), daqmx_scaler_metadata(1, 3, 2)]
+    one_data = "01 00 02 00 03 00"
+    two_data = "01 00 0A 00 02 00 14 00 03 00 1E 00"
+    cases = {
+        "typical.tdms": (one, [2], {**count(2), **lin(1, 2.0, 1.0, 0)}, one_data),
+        "chain.tdms": (one, [2], {**count(3), **poly(1, [1.0, 2.0, 3.0], 0), **lin(2, 10.0, 0.0, 1)}, one_data),
+        "scaler1.tdms": (two, [4], {**count(3), **lin(2, 2.0, 0.0, 1)}, two_data),
+        "order.tdms": (one, [2], {**count(3), **lin(1, 2.0, 0.0, 2), **lin(2, 3.0, 0.0, 0)}, one_data),
+        "count.tdms": (two, [4], {**count(2), **lin(0, 2.0, 0.0, 0)}, two_data),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, (scalers, widths, props, data) in cases.items():
+            meta = segment_objects_metadata(
+                root_metadata(),
+                group_metadata(),
+                daqmx_channel_metadata("Channel1", 3, widths, scalers, properties=props),
+            )
+            write_generated(os.path.join(tmp, name), [(segment_toc(), meta, data)])
+        got = go_read(tmp)
+        for name in cases:
+            opened = TdmsFile.read(os.path.join(tmp, name))
+            try:
+                want = [float(x) for x in opened["Group"]["Channel1"][:]]
+            finally:
+                opened.close()
+            ch = got[name]["channels"][0]
+            if "scaled_error" in ch:
+                raise SystemExit(f"daqmx scale {name}: gotdms error {ch['scaled_error']}")
+            if ch["scaled"] != want:
+                raise SystemExit(f"daqmx scale {name}: gotdms {ch['scaled']} != npTDMS {want}")
+            if ch["values"] != [1.0, 2.0, 3.0]:
+                raise SystemExit(f"daqmx scale {name}: Values were scaled: {ch['values']}")
 
 
 if __name__ == "__main__":

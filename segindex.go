@@ -485,7 +485,7 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 			}
 			var dx *daqmxState
 			if has == indexHasDAQmx {
-				dx, err = r.daqmxBlock(spans, total)
+				dx, err = r.daqmxBlock(spans, total, DataType(dt))
 				if err != nil {
 					return nil, err
 				}

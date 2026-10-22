@@ -536,11 +536,24 @@ func TestDAQmxMultiSegment(t *testing.T) {
 	}
 	assertEqual(t, mid, []int16{2, 3, 4})
 
+	// The buffer width may change (npTDMS reads this). The scaler may not.
 	wider := chDAQmx("/'g'/'c'", 1, 0, []uint32{4}, []dmScaler{{typ: 3, off: 0}})
-	bad := buildDAQmx(daqTOC, []dmObj{wider}, i16Raw(1, 2))
-	_, err = NewReader(bytes.NewReader(append(first, bad...)))
+	f = openBytes(t, append(first, buildDAQmx(daqTOC, []dmObj{wider}, i16Raw(1, 2))...))
+	assertEqual(t, mustValues(t, daqCh(t, f, "g", "c")), []int16{1, 2, 1})
+	for name, sc := range map[string]dmScaler{
+		"type":     {typ: 5, off: 0},
+		"scale id": {id: 3, typ: 3, off: 0},
+	} {
+		changed := chDAQmx("/'g'/'c'", 1, 0, []uint32{4}, []dmScaler{sc})
+		_, err = NewReader(bytes.NewReader(append(first, buildDAQmx(daqTOC, []dmObj{changed}, le32(1))...)))
+		if !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("scaler %s change: %v", name, err)
+		}
+	}
+	digital := chDAQmx("/'g'/'c'", 1, RawIndexDAQmxDigitalObserved, []uint32{2}, []dmScaler{{typ: 0, off: 0}})
+	_, err = NewReader(bytes.NewReader(append(first, buildDAQmx(daqTOC, []dmObj{digital}, i16Raw(1))...)))
 	if !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("layout change: %v", err)
+		t.Fatalf("analog to digital: %v", err)
 	}
 	std := buildDAQmx(TocMetaData|TocNewObjList|TocRawData, []dmObj{objStd("/'g'/'c'", TypeInt16, 1)}, i16Raw(9))
 	_, err = NewReader(bytes.NewReader(append(first, std...)))
@@ -650,7 +663,6 @@ func TestDAQmxRejectedLayouts(t *testing.T) {
 	mustOpenErr(t, base(floatDig, []byte{0, 0, 0, 0}), ErrDAQmx)
 	stdRaw := objStd("/'g'/'c'", TypeDAQmxRaw, 0)
 	mustOpenErr(t, buildDAQmx(TocMetaData|TocNewObjList|TocRawData, []dmObj{stdRaw}, nil), ErrDAQmx)
-	mustOpenErr(t, buildDAQmx(daqTOC, []dmObj{objStd("/'g'/'c'", TypeInt16, 1)}, i16Raw(1)), ErrDAQmx)
 	mixed := []dmObj{
 		chDAQmx("/'g'/'a'", 1, 0, []uint32{2}, i16),
 		objStd("/'g'/'b'", TypeInt16, 1),
@@ -664,10 +676,19 @@ func TestDAQmxRejectedLayouts(t *testing.T) {
 	mustOpenErr(t, base(past, i16Raw(1)), ErrCorrupt)
 	orphan := chDAQmx("/'g'/'c'", 1, 0, []uint32{2, 2}, []dmScaler{{typ: 3, buf: 0}})
 	mustOpenErr(t, base(orphan, i16Raw(1)), ErrDAQmx)
+	// A typed DAQmx index must name the one scaler's own type.
 	badType := chDAQmx("/'g'/'c'", 1, 0, []uint32{2}, i16)
 	badType.forceType = true
-	badType.dataType = uint32(TypeInt16)
+	badType.dataType = uint32(TypeInt32)
 	mustOpenErr(t, base(badType, i16Raw(1)), ErrDAQmx)
+	strType := chDAQmx("/'g'/'c'", 1, 0, []uint32{2}, i16)
+	strType.forceType = true
+	strType.dataType = uint32(TypeString)
+	mustOpenErr(t, base(strType, i16Raw(1)), ErrDAQmx)
+	typedTwo := chDAQmx("/'g'/'c'", 1, 0, []uint32{4}, []dmScaler{{typ: 3, off: 0}, {id: 1, typ: 3, off: 2}})
+	typedTwo.forceType = true
+	typedTwo.dataType = uint32(TypeInt16)
+	mustOpenErr(t, base(typedTwo, i16Raw(1, 2)), ErrDAQmx)
 	badDim := chDAQmx("/'g'/'c'", 1, 0, []uint32{2}, i16)
 	badDim.setDim = true
 	badDim.arrayDim = 2
@@ -832,13 +853,33 @@ func TestDAQmxScaling(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEqual(t, zeros, []float64{0, 0, 0})
-	if _, err := ApplyDAQmxScale([]DAQmxScale{
-		lin(0, 1, 0, true, 0xFFFFFFFF),
-		lin(1, 1, 0, true, 0xFFFFFFFF),
-		lin(2, 1, 0, false, 0),
-	}, rawIn); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("two terminals: %v", err)
+	// The output is the highest index (npTDMS MultiScaling), even when
+	// another scale is not read by anything.
+	got, err = ApplyDAQmxScale([]DAQmxScale{
+		lin(0, 2, 0, true, 0xFFFFFFFF),
+		lin(1, 5, 0, true, 0xFFFFFFFF),
+		lin(2, 3, 0, false, 0),
+	}, rawIn)
+	if err != nil {
+		t.Fatal(err)
 	}
+	assertEqual(t, got, []float64{6, 12, 18})
+	got, err = ApplyDAQmxScale([]DAQmxScale{
+		lin(1, 2, 0, false, 2),
+		lin(2, 3, 0, true, 0xFFFFFFFF),
+	}, rawIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, []float64{3, 6, 9})
+	if _, err := ApplyDAQmxScale([]DAQmxScale{lin(1, 1, 0, true, 0), lin(1, 2, 0, true, 0)}, rawIn); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("duplicate: %v", err)
+	}
+	got, err = ApplyDAQmxScale(nil, rawIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, rawIn)
 	if _, err := ApplyDAQmxScale([]DAQmxScale{
 		lin(2, 1, 0, false, 0),
 		lin(0, 1, 0, false, 1),

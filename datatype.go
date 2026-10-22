@@ -37,9 +37,10 @@ const (
 	TypeComplex128 DataType = 0x10000d
 	// TypeDAQmxRaw is the data-type word 0xFFFFFFFF inside a DAQmx raw-data
 	// index. It marks the index, not the samples. The channel's DataType after
-	// a successful read is the scaler's native type. A property value of this
-	// type, or a standard raw-data index whose type word is 0xFFFFFFFF, still
-	// returns ErrDAQmx.
+	// a successful read is the scaler's native type. A DAQmx index may instead
+	// carry its one scaler's type, which npTDMS also reads. A property value of
+	// this type, or a standard raw-data index whose type word is 0xFFFFFFFF,
+	// still returns ErrDAQmx.
 	TypeDAQmxRaw DataType = 0xFFFFFFFF
 )
 

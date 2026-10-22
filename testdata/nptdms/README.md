@@ -28,5 +28,9 @@ through `channel[:]` for a DAQmx raw buffer, so the harness does not call
 it. The helpers write index word `0x00001269` for a format-changing scaler
 and `0x0000126A` for a digital line. The `0x00001369` file is that same
 `0x00001269` file with the index word changed; gotdms is compared to the
-raw values npTDMS read from the original. No npTDMS decoder source is
-vendored or ported.
+raw values npTDMS read from the original. Three more files cover layouts
+npTDMS reads: a DAQmx index typed with its scaler's type, standard indexes
+under `kTocDAQmxRawData`, and a buffer that widens in a later segment. Five
+files with `NI_Scale` chains compare `DAQmxScaledFloat64s` to npTDMS
+`channel[:]`, including a chain whose input is a second DAQmx scaler. No
+npTDMS decoder source is vendored or ported.

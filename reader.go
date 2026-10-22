@@ -654,7 +654,7 @@ func (f *File) parse() error {
 			}
 			interleaved := lead.toc&TocInterleavedData != 0
 			live := lead.next == incompleteSegment || truncated
-			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, live, lead.toc&TocDAQmxRawData != 0); err != nil {
+			if _, err := f.addSpans(slots, dataPos, rawLen, interleaved, big, live); err != nil {
 				return wrapf("read", f.path, err, "segment at %d", pos)
 			}
 		}
@@ -814,8 +814,8 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 			if ch.idx.known && ch.idx.daqmx == nil && ch.hasDT {
 				return nil, wrap("read", opath, fmt.Errorf("%w: channel changed from a standard index to DAQmx raw data", ErrCorrupt))
 			}
-			if ch.daqmx != nil && !sameDAQmxLayout(ch.daqmx.spec, spec) {
-				return nil, wrap("read", opath, fmt.Errorf("%w: DAQmx raw index changed", ErrCorrupt))
+			if ch.daqmx != nil && !sameDAQmxScalers(ch.daqmx.spec, spec) {
+				return nil, wrap("read", opath, fmt.Errorf("%w: DAQmx scalers changed (count, scale id, or type)", ErrCorrupt))
 			}
 			dt := spec.scalers[spec.primary].dt
 			if ch.hasDT && ch.dt != dt {
@@ -1008,15 +1008,15 @@ type rawSlot struct {
 	daqmx *daqmxSpec
 }
 
-func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big, incomplete, daqmxTOC bool) (unused int64, err error) {
+// addSpans lays out one segment's raw data. The raw-data index words decide
+// the layout, not kTocDAQmxRawData: npTDMS reads standard channels in a
+// segment that sets that bit the same way, and DAQmx indexes without it.
+func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big, incomplete bool) (unused int64, err error) {
 	daqN := 0
 	for _, s := range slots {
 		if s.daqmx != nil {
 			daqN++
 		}
-	}
-	if daqmxTOC && daqN == 0 && len(slots) > 0 {
-		return 0, fmt.Errorf("%w: kTocDAQmxRawData set but channels use a standard index", ErrDAQmx)
 	}
 	if daqN > 0 && daqN != len(slots) {
 		return 0, fmt.Errorf("%w: segment mixes DAQmx and standard channels", ErrDAQmx)
