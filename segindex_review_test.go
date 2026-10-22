@@ -255,12 +255,20 @@ func FuzzSegmentIndexTrusted(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	if len(blob) >= segmentIndexHeader+spanRecord+8 {
+	if len(blob) >= segmentIndexHeader+spanRecordV1+8 {
 		huge := append([]byte(nil), blob[segmentIndexHeader:]...)
-		// run count is the last int64 of the single span, just before the
-		// channel total. A huge count must not become a trust hit.
-		at := len(huge) - 8 - 8
-		binary.LittleEndian.PutUint64(huge[at:], uint64(1)<<62)
+		// A single segment omits the run words. Set the run flag and insert
+		// step and a huge count just before the channel total. A huge count
+		// must not become a trust hit.
+		spanAt := len(huge) - 8 - spanRecordV1
+		flags := binary.LittleEndian.Uint32(huge[spanAt+52:]) | spanFlagRun
+		binary.LittleEndian.PutUint32(huge[spanAt+52:], flags)
+		tail := append([]byte(nil), huge[len(huge)-8:]...)
+		run := make([]byte, 16)
+		binary.LittleEndian.PutUint64(run[0:8], 1)
+		binary.LittleEndian.PutUint64(run[8:16], uint64(1)<<62)
+		huge = append(huge[:len(huge)-8], run...)
+		huge = append(huge, tail...)
 		f.Add(huge, uint32(0))
 	}
 	f.Fuzz(func(t *testing.T, payload []byte, flags uint32) {

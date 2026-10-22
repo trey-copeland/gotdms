@@ -146,10 +146,10 @@ func releaseScratch(b []byte) {
 // relies on that to keep one batch buffer. Big-endian segments are byte-swapped
 // in place after the read, which yields native values on a little-endian host.
 func (c *Channel) readFast(r io.ReaderAt, start, n int, reuse any) (any, bool, error) {
-	return readFastSpans(c.dt, c.spans, r, start, n, reuse)
+	return readFastSpans(c.dt, c.spans, c.runs, r, start, n, reuse)
 }
 
-func readFastSpans(dt DataType, spans []span, r io.ReaderAt, start, n int, reuse any) (any, bool, error) {
+func readFastSpans(dt DataType, spans []span, runs []spanRun, r io.ReaderAt, start, n int, reuse any) (any, bool, error) {
 	if !nativeLittleEndian {
 		return nil, false, nil
 	}
@@ -159,35 +159,35 @@ func readFastSpans(dt DataType, spans []span, r io.ReaderAt, start, n int, reuse
 	}
 	switch dt.storage() {
 	case TypeInt8:
-		return readFixed[int8](dt, spans, r, start, n, sz, reuse)
+		return readFixed[int8](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeInt16:
-		return readFixed[int16](dt, spans, r, start, n, sz, reuse)
+		return readFixed[int16](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeInt32:
-		return readFixed[int32](dt, spans, r, start, n, sz, reuse)
+		return readFixed[int32](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeInt64:
-		return readFixed[int64](dt, spans, r, start, n, sz, reuse)
+		return readFixed[int64](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeUint8:
-		return readFixed[uint8](dt, spans, r, start, n, sz, reuse)
+		return readFixed[uint8](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeUint16:
-		return readFixed[uint16](dt, spans, r, start, n, sz, reuse)
+		return readFixed[uint16](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeUint32:
-		return readFixed[uint32](dt, spans, r, start, n, sz, reuse)
+		return readFixed[uint32](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeUint64:
-		return readFixed[uint64](dt, spans, r, start, n, sz, reuse)
+		return readFixed[uint64](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeFloat32:
-		return readFixed[float32](dt, spans, r, start, n, sz, reuse)
+		return readFixed[float32](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeFloat64:
-		return readFixed[float64](dt, spans, r, start, n, sz, reuse)
+		return readFixed[float64](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeComplex64:
-		return readFixed[complex64](dt, spans, r, start, n, sz, reuse)
+		return readFixed[complex64](dt, spans, runs, r, start, n, sz, reuse)
 	case TypeComplex128:
-		return readFixed[complex128](dt, spans, r, start, n, sz, reuse)
+		return readFixed[complex128](dt, spans, runs, r, start, n, sz, reuse)
 	default:
 		return nil, false, nil
 	}
 }
 
-func readFixed[T fixedNative](dt DataType, spans []span, r io.ReaderAt, start, n, sz int, reuse any) (any, bool, error) {
+func readFixed[T fixedNative](dt DataType, spans []span, runs []spanRun, r io.ReaderAt, start, n, sz int, reuse any) (any, bool, error) {
 	var out []T
 	if s, ok := reuse.([]T); ok && cap(s) >= n {
 		out = s[:n]
@@ -196,7 +196,7 @@ func readFixed[T fixedNative](dt DataType, spans []span, r io.ReaderAt, start, n
 	}
 	if n > 0 {
 		raw := unsafe.Slice((*byte)(unsafe.Pointer(&out[0])), n*sz)
-		if err := fillPackedSpans(spans, dt, r, start, n, sz, raw); err != nil {
+		if err := fillPackedSpans(spans, runs, dt, r, start, n, sz, raw); err != nil {
 			return nil, true, err
 		}
 	}
@@ -204,10 +204,10 @@ func readFixed[T fixedNative](dt DataType, spans []span, r io.ReaderAt, start, n
 }
 
 func (c *Channel) fillPacked(r io.ReaderAt, start, n, size int, dst []byte) error {
-	return fillPackedSpans(c.spans, c.dt, r, start, n, size, dst)
+	return fillPackedSpans(c.spans, c.runs, c.dt, r, start, n, size, dst)
 }
 
-func fillPackedSpans(spans []span, dt DataType, r io.ReaderAt, start, n, size int, dst []byte) error {
+func fillPackedSpans(spans []span, runs []spanRun, dt DataType, r io.ReaderAt, start, n, size int, dst []byte) error {
 	if n == 0 {
 		return nil
 	}
@@ -222,7 +222,7 @@ func fillPackedSpans(spans []span, dt DataType, r io.ReaderAt, start, n, size in
 			break
 		}
 		sp := &spans[i]
-		avail, err := spanSamples(sp)
+		avail, err := spanSamples(sp, runs)
 		if err != nil {
 			return err
 		}
@@ -240,7 +240,7 @@ func fillPackedSpans(spans []span, dt DataType, r io.ReaderAt, start, n, size in
 			return ErrCorrupt
 		}
 		region := dst[filled*size : (filled+int(take))*size]
-		if err := sp.copyValues(r, pos, take, region); err != nil {
+		if err := sp.copyValues(runs, r, pos, take, region); err != nil {
 			return err
 		}
 		normalize(dt, region, sp.big)

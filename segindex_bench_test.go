@@ -12,7 +12,8 @@ import (
 // first is a raw-only lead-in plus four float64 samples, which is the shape
 // that makes a lead-in walk expensive: many small segments, little metadata.
 // every > 0 writes two samples on each segment whose index is a multiple of
-// every, so the run splitter cannot collapse the whole file.
+// every, so the run splitter cannot collapse the whole file. every == 2
+// alternates one and two samples, so no adjacent spans can merge.
 var fragmentedFiles struct {
 	sync.Mutex
 	paths map[fragKey]string
@@ -85,6 +86,15 @@ func fragmentedTDMS(b *testing.B, segs, every int) string {
 	if err := BuildSegmentIndex(path); err != nil {
 		b.Fatal(err)
 	}
+	st, err := os.Stat(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ss, err := os.Stat(SegmentIndexPath(path))
+	if err != nil {
+		b.Fatal(err)
+	}
+	fmt.Fprintf(os.Stderr, "frag segs=%d every=%d tdms=%d sidecar=%d\n", segs, every, st.Size(), ss.Size())
 	fragmentedFiles.paths[key] = path
 	return path
 }
@@ -97,8 +107,10 @@ func BenchmarkSegmentIndexOpen(b *testing.B) {
 	}{
 		{10_000, 0, "uniform"},
 		{10_000, 1000, "mixed"},
+		{10_000, 2, "alternating"},
 		{100_000, 0, "uniform"},
 		{100_000, 1000, "mixed"},
+		{100_000, 2, "alternating"},
 	}
 	for _, c := range cases {
 		path := fragmentedTDMS(b, c.segs, c.every)

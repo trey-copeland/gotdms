@@ -88,7 +88,7 @@ func (c *Channel) committed() int64 {
 		if sp.live {
 			continue
 		}
-		s, err := spanSamples(sp)
+		s, err := spanSamples(sp, c.runs)
 		if err != nil {
 			return 0
 		}

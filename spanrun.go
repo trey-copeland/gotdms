@@ -29,16 +29,17 @@ func coalesceChannel(ch *Channel) {
 	if ch == nil {
 		return
 	}
-	ch.spans = coalesceSpans(ch.spans)
+	ch.spans, ch.runs = coalesceSpans(ch.spans, ch.runs)
 	if ch.daqmx == nil || ch.daqmx.spec == nil {
 		return
 	}
 	for i := range ch.daqmx.spans {
 		if i == ch.daqmx.spec.primary {
 			ch.daqmx.spans[i] = ch.spans
+			ch.daqmx.runs[i] = ch.runs
 			continue
 		}
-		ch.daqmx.spans[i] = coalesceSpans(ch.daqmx.spans[i])
+		ch.daqmx.spans[i], ch.daqmx.runs[i] = coalesceSpans(ch.daqmx.spans[i], ch.daqmx.runs[i])
 	}
 }
 
@@ -46,43 +47,62 @@ func coalesceChannel(ch *Channel) {
 // positions advance by a constant step. A string, a live span, a partial
 // tail, or a span that is already a run stays as it is: a run of runs is not
 // folded again, so decoding a version 2 sidecar does not rebuild it.
-func coalesceSpans(in []span) []span {
+func coalesceSpans(in []span, runs []spanRun) ([]span, []spanRun) {
 	if len(in) == 0 {
-		return in
+		return in, runs
 	}
 	if len(in) == 1 {
-		if in[0].runCount < 1 {
-			in[0].runCount = 1
-		}
-		return in
+		in[0] = normRun(in[0])
+		return in, runs
 	}
 	// Two passes so a file that collapses to a handful of runs does not keep
-	// a backing array sized to the segment count.
+	// a backing array sized to the segment count. The count pass remembers
+	// the running step in locals and does not allocate run records.
 	n := 1
 	cur := normRun(in[0])
+	curCount := cur.repeats(runs)
+	curStep := cur.repeatStep(runs)
 	for i := 1; i < len(in); i++ {
 		next := normRun(in[i])
-		ext, ok := tryExtend(cur, next)
-		if !ok {
+		if cur.nPerChunk != next.nPerChunk || cur.nChunks != next.nChunks || cur.typeSize != next.typeSize || !canExtendState(cur, curCount, curStep, next) {
 			n++
 			cur = next
+			curCount = next.repeats(runs)
+			curStep = next.repeatStep(runs)
 			continue
 		}
-		cur = ext
+		nextCount, err := add64(curCount, 1)
+		if err != nil {
+			n++
+			cur = next
+			curCount = next.repeats(runs)
+			curStep = next.repeatStep(runs)
+			continue
+		}
+		if curCount <= 1 {
+			curStep = next.dataPos - cur.dataPos
+		}
+		curCount = nextCount
 	}
 	if n == len(in) {
 		for i := range in {
-			if in[i].runCount < 1 {
-				in[i].runCount = 1
-			}
+			in[i] = normRun(in[i])
 		}
-		return in
+		return in, runs
 	}
 	out := make([]span, 0, n)
+	built := make([]spanRun, 1, n+1)
 	cur = normRun(in[0])
+	cur.runIdx = 0
 	for i := 1; i < len(in); i++ {
 		next := normRun(in[i])
-		ext, ok := tryExtend(cur, next)
+		next.runIdx = 0
+		if cur.nPerChunk != next.nPerChunk || cur.nChunks != next.nChunks || cur.typeSize != next.typeSize {
+			out = append(out, cur)
+			cur = next
+			continue
+		}
+		ext, ok := tryExtend(&built, cur, next)
 		if !ok {
 			out = append(out, cur)
 			cur = next
@@ -91,70 +111,171 @@ func coalesceSpans(in []span) []span {
 		cur = ext
 	}
 	out = append(out, cur)
-	return out
+	return out, built
 }
 
 // appendSpan keeps a channel's span slice in run form. A new segment that
 // continues the last run bumps that run instead of allocating another span.
-func appendSpan(spans []span, sp span) []span {
-	sp = normRun(sp)
+func appendSpan(spans []span, runs []spanRun, sp span) ([]span, []spanRun) {
+	sp.runIdx = 0
 	if len(spans) == 0 {
-		return append(spans, sp)
+		return append(spans, sp), runs
 	}
-	ext, ok := tryExtend(spans[len(spans)-1], sp)
+	// Sample count is what changes on a file that cannot form a run.
+	// Compare in place so a rejected span is not copied before append.
+	last := &spans[len(spans)-1]
+	if last.nPerChunk != sp.nPerChunk || last.nChunks != sp.nChunks || last.typeSize != sp.typeSize {
+		return append(spans, sp), runs
+	}
+	if last.runIdx != 0 {
+		if extendRun(last, runs, sp) {
+			return spans, runs
+		}
+		return append(spans, sp), runs
+	}
+	ext, ok := tryExtend(&runs, *last, sp)
 	if !ok {
-		return append(spans, sp)
+		return append(spans, sp), runs
 	}
 	spans[len(spans)-1] = ext
-	return spans
+	return spans, runs
+}
+
+// extendRun continues an existing run. The span stays where it is, so a
+// uniform file does not copy it on every segment.
+func extendRun(last *span, runs []spanRun, next span) bool {
+	idx := int(last.runIdx)
+	if idx <= 0 || idx >= len(runs) {
+		return false
+	}
+	rec := &runs[idx]
+	count := rec.count
+	step := rec.step
+	if count < 2 || step <= 0 || next.runIdx != 0 {
+		return false
+	}
+	if last.str || next.str || last.live || next.live || last.partialN != 0 || next.partialN != 0 {
+		return false
+	}
+	if !sameLayout(last, &next) {
+		return false
+	}
+	delta, err := mul64(count, step)
+	if err != nil {
+		return false
+	}
+	want, err := add64(last.dataPos, delta)
+	if err != nil || want != next.dataPos {
+		return false
+	}
+	n, err := add64(count, 1)
+	if err != nil {
+		return false
+	}
+	rec.count = n
+	return true
+}
+
+func (sp *span) repeats(runs []spanRun) int64 {
+	if sp == nil || sp.runIdx == 0 || int(sp.runIdx) >= len(runs) {
+		return 1
+	}
+	n := runs[sp.runIdx].count
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+func (sp *span) repeatStep(runs []spanRun) int64 {
+	if sp == nil || sp.runIdx == 0 || int(sp.runIdx) >= len(runs) || runs[sp.runIdx].count <= 1 {
+		return 0
+	}
+	return runs[sp.runIdx].step
+}
+
+// setRun installs a repeat on sp and returns the table that holds it.
+// count <= 1 clears the run.
+func (sp *span) setRun(runs []spanRun, count, step int64) []spanRun {
+	if sp == nil || count <= 1 {
+		if sp != nil {
+			sp.runIdx = 0
+		}
+		return runs
+	}
+	runs, sp.runIdx = allocRun(runs, count, step)
+	return runs
+}
+
+// allocRun appends one run record. Index 0 is unused. The first record is
+// allocated with room for itself so a channel that collapses to one run
+// does not grow the table twice.
+func allocRun(runs []spanRun, count, step int64) ([]spanRun, uint32) {
+	if len(runs) == 0 {
+		runs = make([]spanRun, 1, 2)
+	}
+	runs = append(runs, spanRun{count: count, step: step})
+	return runs, uint32(len(runs) - 1)
 }
 
 func normRun(sp span) span {
-	if sp.runCount < 1 {
-		sp.runCount = 1
+	if sp.runIdx != 0 {
+		return sp
 	}
 	return sp
 }
 
-func tryExtend(cur, next span) (span, bool) {
-	n, err := add64(cur.runCount, 1)
-	if err != nil || !canExtend(cur, next) {
+func tryExtend(runs *[]spanRun, cur, next span) (span, bool) {
+	if !canExtend(*runs, cur, next) {
 		return span{}, false
 	}
-	if cur.runCount <= 1 {
-		cur.runStep = next.dataPos - cur.dataPos
+	n, err := add64(cur.repeats(*runs), 1)
+	if err != nil {
+		return span{}, false
 	}
-	cur.runCount = n
+	step := cur.repeatStep(*runs)
+	if cur.repeats(*runs) <= 1 {
+		step = next.dataPos - cur.dataPos
+	}
+	if cur.runIdx == 0 {
+		*runs, cur.runIdx = allocRun(*runs, n, step)
+		return cur, true
+	}
+	(*runs)[cur.runIdx].count = n
+	(*runs)[cur.runIdx].step = step
 	return cur, true
 }
 
-func canExtend(cur, next span) bool {
-	if next.runCount != 1 || cur.runCount < 1 {
+func canExtendState(cur span, curCount, curStep int64, next span) bool {
+	if next.runIdx != 0 || curCount < 1 {
 		return false
 	}
 	if cur.str || next.str || cur.live || next.live || cur.partialN != 0 || next.partialN != 0 {
+		return false
+	}
+	if cur.nChunks != next.nChunks || cur.nPerChunk != next.nPerChunk || cur.chunkSize != next.chunkSize || cur.typeSize != next.typeSize {
+		return false
+	}
+	if !sameLayout(&cur, &next) {
 		return false
 	}
 	one, err := mul64(cur.nChunks, cur.nPerChunk)
 	if err != nil || one <= 0 {
 		return false
 	}
-	if !sameLayout(cur, next) {
-		return false
-	}
 	var step int64
-	if cur.runCount <= 1 {
+	if curCount <= 1 {
 		if next.dataPos <= cur.dataPos {
 			return false
 		}
 		step = next.dataPos - cur.dataPos
 	} else {
-		step = cur.runStep
+		step = curStep
 		if step <= 0 {
 			return false
 		}
 	}
-	delta, err := mul64(cur.runCount, step)
+	delta, err := mul64(curCount, step)
 	if err != nil {
 		return false
 	}
@@ -165,7 +286,49 @@ func canExtend(cur, next span) bool {
 	return true
 }
 
-func sameLayout(a, b span) bool {
+func canExtend(runs []spanRun, cur, next span) bool {
+	if next.repeats(runs) != 1 || cur.repeats(runs) < 1 {
+		return false
+	}
+	if cur.str || next.str || cur.live || next.live || cur.partialN != 0 || next.partialN != 0 {
+		return false
+	}
+	// Chunk geometry is the usual reason a merge fails. Reject it before
+	// the overflow-checked multiply so alternating sample counts stay cheap.
+	if cur.nChunks != next.nChunks || cur.nPerChunk != next.nPerChunk || cur.chunkSize != next.chunkSize || cur.typeSize != next.typeSize {
+		return false
+	}
+	if !sameLayout(&cur, &next) {
+		return false
+	}
+	one, err := mul64(cur.nChunks, cur.nPerChunk)
+	if err != nil || one <= 0 {
+		return false
+	}
+	var step int64
+	if cur.repeats(runs) <= 1 {
+		if next.dataPos <= cur.dataPos {
+			return false
+		}
+		step = next.dataPos - cur.dataPos
+	} else {
+		step = cur.repeatStep(runs)
+		if step <= 0 {
+			return false
+		}
+	}
+	delta, err := mul64(cur.repeats(runs), step)
+	if err != nil {
+		return false
+	}
+	want, err := add64(cur.dataPos, delta)
+	if err != nil || want != next.dataPos {
+		return false
+	}
+	return true
+}
+
+func sameLayout(a, b *span) bool {
 	return a.chunkSize == b.chunkSize &&
 		a.nChunks == b.nChunks &&
 		a.nPerChunk == b.nPerChunk &&

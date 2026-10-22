@@ -145,19 +145,19 @@ func runDiffCase(t *testing.T, dc diffCase) {
 			if !ok {
 				continue
 			}
-			exp, err := expandRuns(c.spans)
+			exp, err := expandRuns(c.spans, c.runs)
 			if err != nil {
 				t.Fatal(err)
 			}
 			var buf []byte
 			for i := range exp {
 				sp := &exp[i]
-				n, err := spanSamples(sp)
+				n, err := spanSamples(sp, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				part := make([]byte, int(n)*sz)
-				if err := sp.copyValues(fresh.r, 0, n, part); err != nil {
+				if err := sp.copyValues(nil, fresh.r, 0, n, part); err != nil {
 					t.Fatalf("%s: per-segment read %s: %v", dc.name, c.path, err)
 				}
 				normalize(c.dt, part, sp.big)
@@ -546,7 +546,7 @@ func TestSegmentIndexRunDifferentialHasRuns(t *testing.T) {
 		for _, g := range f.Groups() {
 			for _, c := range g.Channels() {
 				for _, sp := range c.spans {
-					if sp.runCount > 1 {
+					if sp.repeats(c.runs) > 1 {
 						runs++
 					}
 				}

@@ -7,7 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 )
+
+func TestSpanIsSingleSegmentSize(t *testing.T) {
+	if unsafe.Sizeof(span{}) != 112 {
+		t.Fatalf("span is %d bytes; a no-run file allocates one span per segment", unsafe.Sizeof(span{}))
+	}
+}
 
 func TestSegmentIndexRunsMatchParse(t *testing.T) {
 	t.Run("uniform", func(t *testing.T) {
@@ -16,7 +23,7 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 		f := openIndexed(t, path)
 		defer f.Close()
 		ch := chIn(t, f, "g", "a")
-		if len(ch.spans) != 1 || ch.spans[0].runCount != 20 {
+		if len(ch.spans) != 1 || ch.spans[0].repeats(ch.runs) != 20 {
 			t.Fatalf("spans %d run %d", len(ch.spans), runCountOf(ch))
 		}
 		blob, err := os.ReadFile(SegmentIndexPath(path))
@@ -44,9 +51,33 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 			t.Fatalf("mixed spans %d", len(ch.spans))
 		}
 		for _, sp := range ch.spans {
-			if sp.runCount > 1 && (sp.str || sp.live || sp.partialN != 0) {
+			if sp.repeats(ch.runs) > 1 && (sp.str || sp.live || sp.partialN != 0) {
 				t.Fatalf("irregular run %+v", sp)
 			}
+		}
+	})
+	t.Run("alternating", func(t *testing.T) {
+		path := writeSegments(t, 8, 2, false, false)
+		assertIndexMatchesParse(t, path)
+		f := openIndexed(t, path)
+		defer f.Close()
+		ch := chIn(t, f, "g", "a")
+		if len(ch.spans) != 8 {
+			t.Fatalf("alternating collapsed to %d spans", len(ch.spans))
+		}
+		for _, sp := range ch.spans {
+			if sp.runIdx != 0 {
+				t.Fatalf("single segment stored a run index %d", sp.runIdx)
+			}
+		}
+		blob, err := os.ReadFile(SegmentIndexPath(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Two channels, eight single segments, plus a few hundred bytes of
+		// names and header. Run records would add 256 bytes.
+		if len(blob) > 8*2*spanRecordV1+400 {
+			t.Fatalf("sidecar %d bytes still looks like a run record per span", len(blob))
 		}
 	})
 	t.Run("strings", func(t *testing.T) {
@@ -59,7 +90,7 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 			t.Fatalf("string spans %d", len(ch.spans))
 		}
 		for _, sp := range ch.spans {
-			if sp.runCount > 1 {
+			if sp.repeats(ch.runs) > 1 {
 				t.Fatal("string span was merged")
 			}
 		}
@@ -126,8 +157,9 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 			t.Fatal("version 1 sidecar was a miss")
 		}
 		assertEqual(t, mustValues(t, chIn(t, hit, "g", "a")), mustValues(t, chIn(t, parsed, "g", "a")))
-		if chIn(t, hit, "g", "a").spans[0].runCount != 10 {
-			t.Fatalf("v1 was not coalesced in memory: %+v", chIn(t, hit, "g", "a").spans)
+		hitCh := chIn(t, hit, "g", "a")
+		if hitCh.spans[0].repeats(hitCh.runs) != 10 {
+			t.Fatalf("v1 was not coalesced in memory: %+v", hitCh.spans)
 		}
 		st, err := os.Stat(SegmentIndexPath(path))
 		if err != nil {
@@ -214,9 +246,10 @@ func TestSegmentIndexSampleCapMiss(t *testing.T) {
 		count := fi.Size() - extent + 1
 		sp := span{
 			dataPos: 0, chunkSize: extent, nChunks: 1, nPerChunk: 2,
-			stride: 4, typeSize: 4, runStep: 1, runCount: count,
+			stride: 4, typeSize: 4,
 		}
-		samples, err := spanSamples(&sp)
+		c.runs = sp.setRun(nil, count, 1)
+		samples, err := spanSamples(&sp, c.runs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -249,14 +282,14 @@ func TestSegmentIndexSampleCapMiss(t *testing.T) {
 		var total int64
 		for i := range fc.spans {
 			fc.spans[i] = one
-			fc.spans[i].runCount = 1
-			fc.spans[i].runStep = 0
-			s, err := spanSamples(&fc.spans[i])
+			fc.spans[i].runIdx = 0
+			s, err := spanSamples(&fc.spans[i], nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			total += s
 		}
+		fc.runs = nil
 		fc.total = total
 		if total*int64(one.typeSize) <= fi.Size() {
 			t.Fatalf("many spans do not exceed the file")
@@ -277,10 +310,12 @@ func TestSegmentIndexSampleCapMiss(t *testing.T) {
 		}
 		defer fresh.Close()
 		fc := chIn(t, fresh, "g", "c")
-		fc.spans = []span{{
+		over := span{
 			dataPos: 0, chunkSize: 4, nChunks: 1, nPerChunk: 1,
-			stride: 4, typeSize: 4, runStep: 1 << 62, runCount: 4,
-		}}
+			stride: 4, typeSize: 4,
+		}
+		fc.runs = over.setRun(nil, 4, 1<<62)
+		fc.spans = []span{over}
 		fc.total = 4
 		blob, err := encodeSegmentIndex(fresh, fi.Size(), fi.ModTime().UnixNano(), dev, ino, fp)
 		if err != nil {
@@ -309,7 +344,7 @@ func TestSegmentIndexRunDAQmxAndLive(t *testing.T) {
 	f := openIndexed(t, path)
 	defer f.Close()
 	c := chIn(t, f, "g", "c")
-	if len(c.spans) != 1 || c.spans[0].runCount != 5 {
+	if len(c.spans) != 1 || c.spans[0].repeats(c.runs) != 5 {
 		t.Fatalf("daqmx spans %d run %d", len(c.spans), runCountOf(c))
 	}
 	sl, err := c.DAQmxSlice(c.daqmx.spec.scalers[c.daqmx.spec.primary].scaleID, 1, 4)
@@ -361,7 +396,7 @@ func TestSegmentIndexRunDAQmxAndLive(t *testing.T) {
 		t.Fatalf("live tail merged: %+v", lch.spans)
 	}
 	last := lch.spans[len(lch.spans)-1]
-	if !last.live || last.runCount > 1 {
+	if !last.live || last.repeats(lch.runs) > 1 {
 		t.Fatalf("tail %+v", last)
 	}
 	if lch.committed() == lch.total {
@@ -372,7 +407,7 @@ func TestSegmentIndexRunDAQmxAndLive(t *testing.T) {
 func TestCoalesceSkipsIrregular(t *testing.T) {
 	base := span{
 		dataPos: 100, chunkSize: 8, nChunks: 1, nPerChunk: 1,
-		stride: 8, typeSize: 8, runCount: 1,
+		stride: 8, typeSize: 8,
 	}
 	next := base
 	next.dataPos = 180
@@ -388,12 +423,12 @@ func TestCoalesceSkipsIrregular(t *testing.T) {
 	changed := base
 	changed.nPerChunk = 2
 	changed.dataPos = 500
-	out := coalesceSpans([]span{base, next, str, live, partial, changed})
-	if len(out) != 5 || out[0].runCount != 2 || out[0].runStep != 80 {
+	out, runs := coalesceSpans([]span{base, next, str, live, partial, changed}, nil)
+	if len(out) != 5 || out[0].repeats(runs) != 2 || out[0].repeatStep(runs) != 80 {
 		t.Fatalf("%+v", out)
 	}
 	for _, sp := range out[1:] {
-		if sp.runCount > 1 {
+		if sp.repeats(runs) > 1 {
 			t.Fatalf("merged irregular %+v", sp)
 		}
 	}
@@ -636,7 +671,7 @@ func runCountOf(c *Channel) int64 {
 	if len(c.spans) == 0 {
 		return 0
 	}
-	return c.spans[0].runCount
+	return c.spans[0].repeats(c.runs)
 }
 
 func cursorFloats(t *testing.T, c *Channel) []float64 {

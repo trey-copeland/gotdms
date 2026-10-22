@@ -328,7 +328,7 @@ The file is not an NI `*.tdms_index` (`TDSh`) companion. Raw samples are not sto
 
 On Windows the device and inode are the volume serial number and the file index from `GetFileInformationByHandle`. A replaced file with the same size and the same timestamp is a miss, the same as on Linux. On a platform that still reports no device and inode, trust mode checks only size and modification time, and both identity fields are stored as 0. FAT records modification time in steps of 2 seconds, and exFAT in steps of 10 milliseconds, so two writes inside one step share a timestamp and an edit in that step is missed.
 
-The sidecar is little-endian, version 2, magic `GTDX` (72-byte header, then the object tree). Version 1 sidecars still decode; a v0.1.0 reader accepts only version 1, so a version 2 sidecar is a miss there. The header holds the data file's size, modification time in Unix nanoseconds, device id and inode (0 when the platform does not report them), an IEEE CRC-32 of every lead-in followed by that segment's metadata, and an IEEE CRC-32 of the payload. Flags record an incomplete final segment, a partial tail, and a final segment recovered by `WithLenientTail` (bit 2). The payload is file properties, then groups, channels, and the spans `Values` uses to address samples. Consecutive spans of one channel that share a chunk layout and advance by a constant byte step are stored as one run (start, step, repeat count) both on disk and in memory. `Values`, `Slice`, and `Cursor` walk the run; they do not expand it into one span per segment on open. Strings, live segments, and partial tails stay one span. Properties use the ordinary TDMS property encoding.
+The sidecar is little-endian, version 2, magic `GTDX` (72-byte header, then the object tree). Version 1 sidecars still decode; a v0.1.0 reader accepts only version 1, so a version 2 sidecar is a miss there. The header holds the data file's size, modification time in Unix nanoseconds, device id and inode (0 when the platform does not report them), an IEEE CRC-32 of every lead-in followed by that segment's metadata, and an IEEE CRC-32 of the payload. Flags record an incomplete final segment, a partial tail, and a final segment recovered by `WithLenientTail` (bit 2). The payload is file properties, then groups, channels, and the spans `Values` uses to address samples. Consecutive spans of one channel that share a chunk layout and advance by a constant byte step are one run. A single segment is a 96-byte record. A run sets flag bit 5 and appends the step and count, 112 bytes in all. In memory the span stays 112 bytes either way. A run index selects the step and count in a side table, and index 0 is one segment. The index is not a pointer, so growing the span slice takes no write barrier. Version 2 is stored already merged, so open does not coalesce it again. Version 1 is one span per segment and is coalesced on open. `Values`, `Slice`, and `Cursor` walk a run and leave a single segment on the one-segment path. Strings, live segments, and partial tails stay one span. Properties use the ordinary TDMS property encoding.
 
 An open uses the sidecar only when every one of those checks matches the file it is about to read. A missing sidecar, a size or time or identity mismatch, a fingerprint mismatch, a bad payload checksum, an unknown version, or a truncated file is ignored. `Open` still returns the parsed file. After a full parse the sidecar is replaced by writing a temporary file in the same directory and renaming it over the sidecar. A failure of that write does not fail the open. Passing the data path itself as the sidecar is ignored, so the TDMS file is not overwritten. `File.SegmentIndexUsed` reports whether this open restored the layout from the sidecar.
 
@@ -336,24 +336,30 @@ An open uses the sidecar only when every one of those checks matches the file it
 
 `gotdms index [--force] [--check] file.tdms...` writes one sidecar per file. Several file arguments, a directory of `.tdms` files, or a pattern are accepted. An argument that already exists is that path, including a name that contains `*`, `?`, or `[`. A directory skips entries that are not regular files. The same path reached twice is indexed once. Without `--force`, a sidecar that already matches is left in place. `--check` reports whether each existing sidecar matches and does not write. The process exits non-zero if any file fails.
 
-`BenchmarkSegmentIndexOpen` opens a synthetic file of many segments three ways: no sidecar, a default sidecar hit, and a trust-identity hit. Each segment after the first is a lead-in plus four `float64` samples (one per channel). Uniform files write one sample per channel every segment. Mixed files write two samples on every 1000th segment, so the run splitter has to break. Files and sidecars are built once, outside the timed loop. Figures are medians of 10 runs (`go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10`, default benchtime). Each median is the average of the 5th and 6th sorted runs. The host is a 4 vCPU Intel Xeon cloud VM, Linux amd64, 16 GiB, Go 1.22.2.
+`BenchmarkSegmentIndexOpen` opens a synthetic file of many segments three ways: no sidecar, a default sidecar hit, and a trust-identity hit. Each segment after the first is a lead-in plus four `float64` samples (one per channel). Uniform files write one sample per channel every segment. Mixed files write two samples on every 1000th segment, so the run splitter has to break. Alternating files write two samples on every even segment and one on every odd segment, so no run can form. Files and sidecars are built once, outside the timed loop. Figures are medians of 10 runs (`go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10`, default benchtime). Each median is the average of the 5th and 6th sorted runs. The host is a 4 vCPU Intel Xeon cloud VM, Linux amd64, 16 GiB, Go 1.22.2.
 
 | Segments | Layout | TDMS | Sidecar | Open | Median time | B/op | allocs/op |
 | --- | --- | ---: | ---: | --- | ---: | ---: | ---: |
-| 10,000 | uniform | 600,187 | 703 | no sidecar | 7.240 ms | 3,203,154 | 60,047 |
-| 10,000 | uniform | 600,187 | 703 | sidecar | 2.828 ms | 324,912 | 10,048 |
-| 10,000 | uniform | 600,187 | 703 | trust identity | 8.580 µs | 4,704 | 46 |
-| 10,000 | mixed | 603,471 | 9,215 | no sidecar | 7.266 ms | 3,241,588 | 60,333 |
-| 10,000 | mixed | 603,471 | 9,215 | sidecar | 2.812 ms | 346,960 | 10,067 |
-| 10,000 | mixed | 603,471 | 9,215 | trust identity | 19.853 µs | 23,712 | 46 |
-| 100,000 | uniform | 6,000,187 | 703 | no sidecar | 71.600 ms | 32,003,264 | 600,048 |
-| 100,000 | uniform | 6,000,187 | 703 | sidecar | 27.851 ms | 3,204,919 | 100,048 |
-| 100,000 | uniform | 6,000,187 | 703 | trust identity | 8.587 µs | 4,704 | 46 |
-| 100,000 | mixed | 6,034,431 | 89,855 | no sidecar | 72.175 ms | 32,334,462 | 602,866 |
-| 100,000 | mixed | 6,034,431 | 89,855 | sidecar | 28.290 ms | 3,434,712 | 100,247 |
-| 100,000 | mixed | 6,034,431 | 89,855 | trust identity | 117.376 µs | 202,656 | 46 |
+| 10,000 | uniform | 600,187 | 703 | no sidecar | 6.149 ms | 3,203,285 | 60,051 |
+| 10,000 | uniform | 600,187 | 703 | sidecar | 2.829 ms | 325,040 | 10,052 |
+| 10,000 | uniform | 600,187 | 703 | trust identity | 8.854 µs | 4,832 | 50 |
+| 10,000 | mixed | 603,471 | 8,575 | no sidecar | 6.153 ms | 3,241,587 | 60,349 |
+| 10,000 | mixed | 603,471 | 8,575 | sidecar | 2.893 ms | 347,408 | 10,083 |
+| 10,000 | mixed | 603,471 | 8,575 | trust identity | 18.503 µs | 24,160 | 62 |
+| 10,000 | alternating | 2,320,031 | 3,840,255 | no sidecar | 22.101 ms | 24,807,818 | 200,105 |
+| 10,000 | alternating | 2,320,031 | 3,840,255 | sidecar | 10.116 ms | 10,254,873 | 20,047 |
+| 10,000 | alternating | 2,320,031 | 3,840,255 | trust identity | 3.399 ms | 8,334,819 | 46 |
+| 100,000 | uniform | 6,000,187 | 703 | no sidecar | 63.058 ms | 32,003,346 | 600,051 |
+| 100,000 | uniform | 6,000,187 | 703 | sidecar | 28.165 ms | 3,205,055 | 100,052 |
+| 100,000 | uniform | 6,000,187 | 703 | trust identity | 8.959 µs | 4,832 | 50 |
+| 100,000 | mixed | 6,034,431 | 83,455 | no sidecar | 62.911 ms | 32,348,856 | 602,895 |
+| 100,000 | mixed | 6,034,431 | 83,455 | sidecar | 29.109 ms | 3,440,288 | 100,275 |
+| 100,000 | mixed | 6,034,431 | 83,455 | trust identity | 101.404 µs | 208,225 | 74 |
+| 100,000 | alternating | 23,200,031 | 38,400,255 | no sidecar | 232.001 ms | 284,451,712 | 2,000,145 |
+| 100,000 | alternating | 23,200,031 | 38,400,255 | sidecar | 101.602 ms | 102,434,320 | 200,047 |
+| 100,000 | alternating | 23,200,031 | 38,400,255 | trust identity | 29.826 ms | 83,234,272 | 46 |
 
-A uniform file's sidecar stays 703 bytes at both sizes: four channels become four run records, and the repeat count is one integer. On the 100,000-segment uniform file the no-sidecar open takes 2.57× as long as a default sidecar hit. Trust identity is 8.587 µs, about 8,300× faster than parsing and about 3,200× faster than the default hit. The default hit still walks every lead-in to recompute the fingerprint (100,048 allocs/op). Trust skips that walk (46 allocs/op) and decodes the 703-byte sidecar. The mixed file breaks a run every 1000 segments, so its sidecar is 89,855 bytes and trust takes 117 µs. The fingerprint walk still dominates a default hit, which is why the mixed and uniform sidecar times stay close. No-sidecar allocs stay near one per segment because the lead-in walk allocates; the span slice itself is the runs, not one span per segment.
+A uniform file's sidecar stays 703 bytes at both sizes: four channels become four run records, and the repeat count is one integer. On the 100,000-segment uniform file the no-sidecar open takes 2.24× as long as a default sidecar hit. Trust identity is 8.959 µs, about 7,000× faster than parsing and about 3,100× faster than the default hit. The default hit still walks every lead-in to recompute the fingerprint (100,052 allocs/op). Trust skips that walk (50 allocs/op) and decodes the 703-byte sidecar. The mixed file breaks a run every 1000 segments, so its sidecar is 83,455 bytes at 100,000 segments and trust takes 101 µs. An alternating file cannot form a run. Its sidecar is one 96-byte span per segment per channel, 38,400,255 bytes at 100,000 segments, and the no-sidecar open allocates 284,451,712 bytes. The fingerprint walk still dominates a default hit, which is why the mixed and uniform sidecar times stay close. No-sidecar allocs on a uniform file stay near one per segment because the lead-in walk allocates and the span slice collapses to the runs.
 
 ```
 go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10

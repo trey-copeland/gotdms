@@ -189,7 +189,7 @@ func (c *Channel) DAQmxSlice(scaleID uint32, i, n int) (any, error) {
 	if err != nil {
 		return nil, wrap("read", path, err)
 	}
-	return readTyped(c.file.r, path, c.daqmx.spec.scalers[idx].dt, true, c.daqmx.spans[idx], c.daqmx.totals[idx], i, n, nil)
+	return readTyped(c.file.r, path, c.daqmx.spec.scalers[idx].dt, true, c.daqmx.spans[idx], c.daqmx.runs[idx], c.daqmx.totals[idx], i, n, nil)
 }
 
 // DAQmxScaling reads NI_Scaling_Status and NI_Scale[*]_* properties.
@@ -524,6 +524,7 @@ type daqmxScaler struct {
 type daqmxState struct {
 	spec   *daqmxSpec
 	spans  [][]span
+	runs   [][]spanRun
 	totals []int64
 }
 
@@ -531,6 +532,7 @@ func newDAQmxState(spec *daqmxSpec) *daqmxState {
 	return &daqmxState{
 		spec:   spec,
 		spans:  make([][]span, len(spec.scalers)),
+		runs:   make([][]spanRun, len(spec.scalers)),
 		totals: make([]int64, len(spec.scalers)),
 	}
 }
@@ -856,7 +858,7 @@ func (f *File) addDAQmxSpans(slots []rawSlot, dataPos, rawLen int64, big, live b
 			if err != nil {
 				return 0, err
 			}
-			st.spans[k] = appendSpan(st.spans[k], sp)
+			st.spans[k], st.runs[k] = appendSpan(st.spans[k], st.runs[k], sp)
 			st.totals[k], err = add64(st.totals[k], add)
 			if err != nil {
 				return 0, err
@@ -864,11 +866,11 @@ func (f *File) addDAQmxSpans(slots []rawSlot, dataPos, rawLen int64, big, live b
 			if k != spec.primary {
 				continue
 			}
-			s.ch.spans = appendSpan(s.ch.spans, sp)
-			s.ch.total, err = add64(s.ch.total, add)
-			if err != nil {
-				return 0, err
-			}
+			// The primary scaler is the channel. One slice and one run
+			// table, so a later merge cannot diverge the two views.
+			s.ch.spans = st.spans[k]
+			s.ch.runs = st.runs[k]
+			s.ch.total = st.totals[k]
 		}
 	}
 	if live {
@@ -980,13 +982,13 @@ func (w *ixw) daqmxBlock(st *daqmxState) {
 		}
 		w.u32(uint32(len(st.spans[i])))
 		for _, sp := range st.spans[i] {
-			w.span(sp)
+			w.span(sp, st.runs[i])
 		}
 		w.i64(st.totals[i])
 	}
 }
 
-func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT DataType) (*daqmxState, error) {
+func (r *ixr) daqmxBlock(primarySpans []span, primaryRuns []spanRun, primaryTotal int64, primaryDT DataType) (*daqmxState, error) {
 	header, err := r.u32()
 	if err != nil {
 		return nil, err
@@ -1021,7 +1023,7 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT Data
 		return nil, errIndex
 	}
 	spec := &daqmxSpec{header: header, widths: widths, scalers: make([]daqmxScaler, ns), primary: -1}
-	st := &daqmxState{spec: spec, spans: make([][]span, ns), totals: make([]int64, ns)}
+	st := &daqmxState{spec: spec, spans: make([][]span, ns), runs: make([][]spanRun, ns), totals: make([]int64, ns)}
 	digitalHeader := header == RawIndexDAQmxDigitalObserved
 	for i := 0; i < ns; i++ {
 		dt, err := r.u32()
@@ -1087,6 +1089,7 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT Data
 			}
 			spec.primary = i
 			st.spans[i] = primarySpans
+			st.runs[i] = primaryRuns
 			st.totals[i] = primaryTotal
 			continue
 		}
@@ -1095,8 +1098,9 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT Data
 			return nil, err
 		}
 		spans := make([]span, nspan)
+		var runs []spanRun
 		for k := 0; k < nspan; k++ {
-			spans[k], err = r.span()
+			spans[k], err = r.span(&runs)
 			if err != nil {
 				return nil, err
 			}
@@ -1108,11 +1112,12 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT Data
 		if !spansMatch(spans, sz, digital) {
 			return nil, errIndex
 		}
-		got, err := spanTotal(spans)
+		got, err := spanTotal(spans, runs)
 		if err != nil || got != total {
 			return nil, errIndex
 		}
 		st.spans[i] = spans
+		st.runs[i] = runs
 		st.totals[i] = total
 	}
 	if spec.primary < 0 || primaryScaler(spec.scalers) != spec.primary {

@@ -46,7 +46,7 @@ func expandAllRuns(f *File) (func(), error) {
 			if ch.daqmx != nil {
 				s.dx = append([][]span(nil), ch.daqmx.spans...)
 			}
-			spans, err := expandRuns(ch.spans)
+			spans, err := expandRuns(ch.spans, ch.runs)
 			if err != nil {
 				return nil, err
 			}
@@ -58,7 +58,7 @@ func expandAllRuns(f *File) (func(), error) {
 					if i == p.primary {
 						continue
 					}
-					p.dx[i], err = expandRuns(ch.daqmx.spans[i])
+					p.dx[i], err = expandRuns(ch.daqmx.spans[i], ch.daqmx.runs[i])
 					if err != nil {
 						return nil, err
 					}
@@ -93,17 +93,15 @@ func expandAllRuns(f *File) (func(), error) {
 	}, nil
 }
 
-func expandRuns(in []span) ([]span, error) {
+func expandRuns(in []span, runs []spanRun) ([]span, error) {
 	out := make([]span, 0, len(in))
 	for _, sp := range in {
-		reps := int64(1)
-		if sp.runCount > 1 {
-			reps = sp.runCount
-		}
+		reps := sp.repeats(runs)
+		step := sp.repeatStep(runs)
 		for i := int64(0); i < reps; i++ {
 			one := sp
 			if i > 0 {
-				shift, err := mul64(i, sp.runStep)
+				shift, err := mul64(i, step)
 				if err != nil {
 					return nil, err
 				}
@@ -113,8 +111,7 @@ func expandRuns(in []span) ([]span, error) {
 				}
 				one.dataPos = pos
 			}
-			one.runCount = 1
-			one.runStep = 0
+			one.runIdx = 0
 			out = append(out, one)
 		}
 	}

@@ -433,10 +433,10 @@ func TestSegmentIndexAdversarialLengths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blob) < segmentIndexHeader+spanRecord+8 {
+	if len(blob) < segmentIndexHeader+spanRecordV1+8 {
 		t.Fatalf("sidecar len %d", len(blob))
 	}
-	spanAt := len(blob) - 8 - spanRecord
+	spanAt := len(blob) - 8 - spanRecordV1
 	if got := int64(binary.LittleEndian.Uint64(blob[spanAt+16:])); got != 1 {
 		t.Fatalf("nChunks at %d = %d; span is not where this test assumed", spanAt, got)
 	}

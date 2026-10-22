@@ -311,18 +311,19 @@ func TestDAQmxSidecarRejectsBadScalerType(t *testing.T) {
 		t.Fatal("no DAQmx block")
 	}
 	typeAt := at + 4 + 4 + 2*4 + 4
+	ch := f.byPath["/'g'/'a'"]
 	r := &ixr{b: payload, off: at}
-	if _, err := r.daqmxBlock(f.byPath["/'g'/'a'"].spans, f.byPath["/'g'/'a'"].total, TypeInt16); err != nil {
+	if _, err := r.daqmxBlock(ch.spans, ch.runs, ch.total, TypeInt16); err != nil {
 		t.Fatalf("unmodified block: %v", err)
 	}
 	bad := append([]byte(nil), payload...)
 	putLE32(bad[typeAt:], uint32(TypeString))
 	r = &ixr{b: bad, off: at}
-	if _, err := r.daqmxBlock(f.byPath["/'g'/'a'"].spans, f.byPath["/'g'/'a'"].total, TypeInt16); err == nil {
+	if _, err := r.daqmxBlock(ch.spans, ch.runs, ch.total, TypeInt16); err == nil {
 		t.Fatal("string scaler type accepted")
 	}
 	r = &ixr{b: payload, off: at}
-	if _, err := r.daqmxBlock(f.byPath["/'g'/'a'"].spans, f.byPath["/'g'/'a'"].total, TypeInt32); err == nil {
+	if _, err := r.daqmxBlock(ch.spans, ch.runs, ch.total, TypeInt32); err == nil {
 		t.Fatal("primary type mismatch accepted")
 	}
 }
