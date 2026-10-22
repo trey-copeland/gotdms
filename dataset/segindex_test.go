@@ -1,6 +1,7 @@
 package dataset
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,5 +53,108 @@ func TestSegmentIndexOption(t *testing.T) {
 	}
 	if len(blob) < 4 || string(blob[:4]) != "GTDX" {
 		t.Fatal("corrupt sidecar was not replaced")
+	}
+}
+
+func TestSegmentIndexTrustIdentityOption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.tdms")
+	w, err := tdms.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := w.Group("acq").Channel("ai0", tdms.TypeFloat64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.SetProperty(tdms.PropUnitString, "abcd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Write([]float64{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	clock, err := w.Group("acq").Channel("Time", tdms.TypeFloat64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clock.Write([]float64{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tdms.BuildSegmentIndex(path); err != nil {
+		t.Fatal(err)
+	}
+	side := tdms.SegmentIndexPath(path)
+	before, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := bytes.Index(raw, []byte("abcd"))
+	if idx < 0 {
+		t.Fatal("property bytes not found")
+	}
+	copy(raw[idx:], []byte("wxyz"))
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	ds, err := OpenFiles([]string{path},
+		WithTimestampChannelName("Time"),
+		WithNumericEpoch(epoch),
+		WithSegmentIndexTrustIdentity(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ds.Read(Selector{Name: "ai0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFloats(s.Y, []float64{1, 2}) {
+		t.Fatalf("Y %v", s.Y)
+	}
+	after, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("trust-identity catalog rewrote the sidecar")
+	}
+
+	plain, err := OpenFiles([]string{path},
+		WithTimestampChannelName("Time"),
+		WithNumericEpoch(epoch),
+		WithSegmentIndex(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Read(Selector{Name: "ai0"}); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := os.ReadFile(side)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(before, rewritten) {
+		t.Fatal("default segment index kept a stale sidecar")
+	}
+
+	off := openAt(t, dir, WithSegmentIndexTrustIdentity(), WithSegmentIndex(false))
+	if _, err := off.Read(Selector{Name: "ai0"}); err != nil {
+		t.Fatal(err)
 	}
 }

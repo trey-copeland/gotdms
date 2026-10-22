@@ -192,7 +192,8 @@ t1, _ := wf.TimeAt(1) // 2024-06-01T12:00:00.001Z
 | `File.Status` | Clean end, an incomplete final segment, or (`WithLenientTail`) a truncated final segment, plus any short tail. |
 | `WithLenientTail` | Open a file whose last finite next-segment offset runs past EOF. Whole tail values are readable and are not committed. |
 | `Follow`, `WithTailInterval`, `WithTailBatch` | Poll a file that is still being written. Skip an incomplete sentinel and a past-EOF tail. |
-| `WithSegmentIndex`, `SegmentIndexPath` | Sidecar of the segment layout. Validated by size, modification time, identity, and a metadata fingerprint. |
+| `WithSegmentIndex`, `SegmentIndexPath`, `BuildSegmentIndex` | Sidecar of the segment layout. `BuildSegmentIndex` writes `path + ".gtdx"` and returns a write error. Validated by size, modification time, identity, and a metadata fingerprint. |
+| `WithSegmentIndexTrustIdentity` | Opt-in. Accept the sidecar when size, modification time, device, and inode match, and skip the fingerprint walk. An edit that preserves those values is missed. |
 | `Error` and `Err*` | Wrapped errors. Use `errors.Is`. |
 
 Channel order inside a segment is creation order on the writer, which is the order objects first appear on the reader. `Write` does not reorder channels.
@@ -319,13 +320,25 @@ String, boolean, timestamp, and complex channels return `ErrType`. The check is 
 
 ## Segment index
 
-`WithSegmentIndex(sidecar)` stores the parsed segment layout beside the data file. `SegmentIndexPath(path)` is `path + ".gtdx"`. The file is not an NI `*.tdms_index` (`TDSh`) companion. Raw samples are not stored. A cache hit still reads every lead-in and the metadata bytes that follow it, in order, and recomputes the IEEE CRC-32 fingerprint. It does not decode object paths, raw-data indexes, or properties out of those bytes; the object tree and the spans come from the sidecar. It still reads sample bytes from the TDMS file, so an in-place edit of raw samples is visible. A span that addresses bytes outside the file, or that claims more samples than the file can hold, is a decode error and therefore a cache miss.
+`WithSegmentIndex(sidecar)` stores the parsed segment layout beside the data file. `SegmentIndexPath(path)` is `path + ".gtdx"`. `BuildSegmentIndex(path, opts...)` parses lead-ins and metadata only, writes that sidecar atomically, and returns an error if the write fails. `Open` still ignores a write failure. `BuildSegmentIndexFile` is the same write and returns the sidecar path. `SegmentIndexValid` reports whether the sidecar matches, using the full fingerprint, and does not write. Pass `WithLenientTail` to both the build and a later open when the file's final next-segment offset runs past EOF; the fingerprint walk uses that option, and a truncated sidecar is a miss on a strict open.
 
-The sidecar is little-endian, version 1, magic `GTDX` (72-byte header, then the object tree). The header holds the data file's size, modification time in Unix nanoseconds, device id and inode (0 when the platform does not report them), an IEEE CRC-32 of every lead-in followed by that segment's metadata, and an IEEE CRC-32 of the payload. Flags record an incomplete final segment and a partial tail. The payload is file properties, then groups, channels, and the spans `Values` uses to address samples. Properties use the ordinary TDMS property encoding.
+The file is not an NI `*.tdms_index` (`TDSh`) companion. Raw samples are not stored. By default a cache hit still reads every lead-in and the metadata bytes that follow it, in order, and recomputes the IEEE CRC-32 fingerprint. It does not decode object paths, raw-data indexes, or properties out of those bytes; the object tree and the spans come from the sidecar. It still reads sample bytes from the TDMS file, so an in-place edit of raw samples is visible when the spans still address those bytes. A span that addresses bytes outside the file, or that claims more samples than the file can hold, is a decode error and therefore a cache miss.
+
+`WithSegmentIndexTrustIdentity` is opt-in. Combined with `WithSegmentIndex`, an open accepts the sidecar when size, modification time in Unix nanoseconds, device, and inode match, and it does not re-read lead-ins or metadata for the fingerprint. Use it when a heavily fragmented file is not being edited in place and the fingerprint walk dominates load time. An edit that preserves size and modification time, and that does not replace the inode, is missed: `os.Chtimes` after an in-place metadata rewrite is the usual case. The cached object tree is then stale. Bounds checks still run, so a span outside the file is a cache miss, not an out-of-bounds read. The default open does not set this option.
+
+The sidecar is little-endian, version 1, magic `GTDX` (72-byte header, then the object tree). The header holds the data file's size, modification time in Unix nanoseconds, device id and inode (0 when the platform does not report them), an IEEE CRC-32 of every lead-in followed by that segment's metadata, and an IEEE CRC-32 of the payload. Flags record an incomplete final segment, a partial tail, and a final segment recovered by `WithLenientTail` (bit 2). The payload is file properties, then groups, channels, and the spans `Values` uses to address samples. Properties use the ordinary TDMS property encoding.
 
 An open uses the sidecar only when every one of those checks matches the file it is about to read. A missing sidecar, a size or time or identity mismatch, a fingerprint mismatch, a bad payload checksum, an unknown version, or a truncated file is ignored. `Open` still returns the parsed file. After a full parse the sidecar is replaced by writing a temporary file in the same directory and renaming it over the sidecar. A failure of that write does not fail the open. Passing the data path itself as the sidecar is ignored, so the TDMS file is not overwritten. `File.SegmentIndexUsed` reports whether this open restored the layout from the sidecar.
 
-`dataset.WithSegmentIndex(true)` turns the same cache on for catalog and for later reads. The default is off.
+`dataset.WithSegmentIndex(true)` turns the same cache on for catalog and for later reads. The default is off. `dataset.WithSegmentIndexTrustIdentity` turns the cache on and skips the fingerprint walk; `dataset.WithSegmentIndex(false)` after it turns the cache back off.
+
+`gotdms index [--force] [--check] file.tdms...` writes one sidecar per file. Several file arguments, a directory of `.tdms` files, or a pattern are accepted. Without `--force`, a sidecar that already matches is left in place. `--check` reports whether each existing sidecar matches and does not write. The process exits non-zero if any file fails.
+
+`BenchmarkSegmentIndexOpen` opens a synthetic file of many raw-only segments (four `float64` channels, one sample each per segment) three ways: no sidecar, a default sidecar hit, and a trust-identity hit. Two sizes are measured, 10,000 segments and 100,000 segments. The file and its sidecar are built once, outside the timed loop. Figures below are medians of 10 runs (`go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10`, default benchtime). Each median is the average of the 5th and 6th sorted runs. Machine and results are filled in from the measurement on this host.
+
+```
+go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10
+```
 
 ## Datasets
 

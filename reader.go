@@ -178,7 +178,7 @@ func newReader(r io.ReaderAt, path string, opts ...ReaderOption) (*File, error) 
 		gindex:  map[string]int{},
 		byPath:  map[string]*Channel{},
 	}
-	if cfg.indexSidecar != "" && f.trySegmentIndex(cfg.indexSidecar) {
+	if cfg.indexSidecar != "" && f.trySegmentIndex(cfg.indexSidecar, cfg.indexTrustIdentity) {
 		return f, nil
 	}
 	if err := f.parse(); err != nil {

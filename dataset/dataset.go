@@ -236,6 +236,7 @@ type options struct {
 	tsNameSet   bool
 	ts          map[string]string
 	segIndex    bool
+	segTrust    bool
 }
 
 type clockMode int
@@ -323,10 +324,31 @@ func WithTimestampChannelName(name string) Option {
 // path plus ".gtdx". Catalog and later reads share that cache. A missing,
 // stale, or corrupt sidecar is ignored and the file is parsed; opening the
 // dataset still succeeds. The default is off. See tdms.WithSegmentIndex for
-// the format and the invalidation rules.
+// the format and the invalidation rules. Passing false also clears
+// WithSegmentIndexTrustIdentity.
 func WithSegmentIndex(enabled bool) Option {
 	return func(o *options) {
 		o.segIndex = enabled
+		if !enabled {
+			o.segTrust = false
+		}
+	}
+}
+
+// WithSegmentIndexTrustIdentity turns the sidecar on and skips the lead-in
+// and metadata fingerprint when the file's size, modification time, device,
+// and inode still match. It implies WithSegmentIndex(true). The default
+// dataset open does not use a sidecar. WithSegmentIndex(true) without this
+// option still recomputes the fingerprint.
+//
+// An edit that preserves size and modification time, and that does not
+// replace the file's inode, is missed. Bounds checks on spans remain, so a
+// bad span is a cache miss rather than an out-of-bounds read. See
+// tdms.WithSegmentIndexTrustIdentity.
+func WithSegmentIndexTrustIdentity() Option {
+	return func(o *options) {
+		o.segIndex = true
+		o.segTrust = true
 	}
 }
 
@@ -765,15 +787,19 @@ func run(workers, n int, fn func(i int)) {
 	wg.Wait()
 }
 
-func openTDMS(path string, segIndex bool) (*tdms.File, error) {
+func openTDMS(path string, segIndex, segTrust bool) (*tdms.File, error) {
 	if !segIndex {
 		return tdms.Open(path)
 	}
-	return tdms.Open(path, tdms.WithSegmentIndex(tdms.SegmentIndexPath(path)))
+	opts := []tdms.ReaderOption{tdms.WithSegmentIndex(tdms.SegmentIndexPath(path))}
+	if segTrust {
+		opts = append(opts, tdms.WithSegmentIndexTrustIdentity())
+	}
+	return tdms.Open(path, opts...)
 }
 
 func indexFile(path string, opt options) ([]Occurrence, error) {
-	f, err := openTDMS(path, opt.segIndex)
+	f, err := openTDMS(path, opt.segIndex, opt.segTrust)
 	if err != nil {
 		return nil, err
 	}

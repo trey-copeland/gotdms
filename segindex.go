@@ -22,7 +22,8 @@ import (
 //	44  4   uint32 IEEE CRC-32 of the payload
 //	48  4   uint32 TDMS version of the first segment (4712 or 4713)
 //	52  4   uint32 segment count
-//	56  4   uint32 flags: bit 0 incomplete final segment, bit 1 partial tail
+//	56  4   uint32 flags: bit 0 incomplete final segment, bit 1 partial tail,
+//	        bit 2 final segment recovered by WithLenientTail (truncated)
 //	60  4   uint32 reserved, must be 0
 //	64  8   int64  unused tail bytes
 //	72      payload
@@ -40,15 +41,20 @@ import (
 //
 // Invalidation: size, modification time, device, inode, fingerprint, and the
 // payload checksum must all match. Any miss, or any decode error, discards
-// the sidecar and parses the file. A cache hit still reads every lead-in and
-// the metadata bytes that follow it, in order to recompute that fingerprint;
-// it does not decode object paths, raw-data indexes, or properties out of
-// those bytes. The object tree and the spans come from the sidecar. Sample
-// bytes are read from the file either way, so an in-place change to raw
-// samples is visible on a hit. A change to lead-ins or metadata changes the
-// fingerprint and forces a parse. A span that would address bytes outside
-// the file, or that claims more samples than the file can hold, is a decode
-// error and therefore a cache miss.
+// the sidecar and parses the file. By default a cache hit still reads every
+// lead-in and the metadata bytes that follow it, in order to recompute that
+// fingerprint; it does not decode object paths, raw-data indexes, or
+// properties out of those bytes. WithSegmentIndexTrustIdentity skips that
+// walk when size, modification time, device, and inode already match. An
+// in-place edit that keeps those four values is then invisible. The object
+// tree and the spans come from the sidecar. Sample bytes are read from the
+// file either way, so an in-place change to raw samples is visible on a hit
+// when the spans still address those bytes. A change to lead-ins or metadata
+// changes the fingerprint and forces a parse, unless trust-identity was set
+// and size, time, and identity were preserved. A span that would address
+// bytes outside the file, or that claims more samples than the file can
+// hold, is a decode error and therefore a cache miss, including when
+// trust-identity is set.
 
 const (
 	segmentIndexMagic   = "GTDX"
@@ -58,6 +64,7 @@ const (
 
 	indexFlagIncomplete = 1 << 0
 	indexFlagPartial    = 1 << 1
+	indexFlagTruncated  = 1 << 2
 
 	spanFlagBig     = 1 << 0
 	spanFlagStr     = 1 << 1
@@ -86,7 +93,8 @@ const (
 //	44  uint32 IEEE CRC-32 of the payload
 //	48  uint32 TDMS version (4712 or 4713)
 //	52  uint32 segment count
-//	56  uint32 flags (bit 0 incomplete final segment, bit 1 partial tail)
+//	56  uint32 flags (bit 0 incomplete final segment, bit 1 partial tail,
+//	    bit 2 truncated final segment from WithLenientTail)
 //	60  uint32 reserved, must be 0
 //	64  int64  unused tail bytes
 //	72  payload: file properties, groups, channels, and spans
@@ -115,6 +123,7 @@ type indexImage struct {
 	segs       int
 	incomplete bool
 	partial    bool
+	truncated  bool
 	unused     int64
 	props      []Property
 	groups     []*Group
@@ -130,7 +139,7 @@ func (f *File) dataPath() string {
 	return ""
 }
 
-func (f *File) trySegmentIndex(sidecar string) bool {
+func (f *File) trySegmentIndex(sidecar string, trustIdentity bool) bool {
 	data := f.dataPath()
 	if data == "" || sidecar == "" {
 		return false
@@ -158,9 +167,16 @@ func (f *File) trySegmentIndex(sidecar string) bool {
 	if img.size != fi.Size() || img.mtime != fi.ModTime().UnixNano() || img.dev != dev || img.ino != ino {
 		return false
 	}
-	fp, err := segmentFingerprint(f.r, f.size)
-	if err != nil || fp != img.fp {
+	// A lenient build records a past-EOF tail. A strict open must still
+	// reject that file, so the sidecar is a miss unless this open is lenient.
+	if img.truncated && !f.lenient {
 		return false
+	}
+	if !trustIdentity {
+		fp, err := segmentFingerprint(f.r, f.size, f.lenient)
+		if err != nil || fp != img.fp {
+			return false
+		}
 	}
 	f.installIndex(img)
 	return true
@@ -171,6 +187,7 @@ func (f *File) installIndex(img *indexImage) {
 	f.segs = img.segs
 	f.incomplete = img.incomplete
 	f.partialTail = img.partial
+	f.truncated = img.truncated
 	f.unusedTail = img.unused
 	f.props = img.props
 	f.groups = img.groups
@@ -198,10 +215,13 @@ func (f *File) writeSegmentIndex(sidecar string) error {
 		return nil
 	}
 	fi, err := os.Stat(data)
-	if err != nil || fi.Size() != f.size {
+	if err != nil {
 		return err
 	}
-	fp, err := segmentFingerprint(f.r, f.size)
+	if fi.Size() != f.size {
+		return fmt.Errorf("segment index: file size changed during parse")
+	}
+	fp, err := segmentFingerprint(f.r, f.size, f.lenient)
 	if err != nil {
 		return err
 	}
@@ -211,6 +231,107 @@ func (f *File) writeSegmentIndex(sidecar string) error {
 		return err
 	}
 	return writeAtomic(sidecar, blob)
+}
+
+// BuildSegmentIndex parses lead-ins and metadata of path and writes
+// SegmentIndexPath(path) atomically. Raw samples are not read. A failure to
+// create or replace the sidecar is returned. Open ignores that class of
+// error; this function does not.
+//
+// opts are the same ReaderOptions as Open. WithLenientTail is honored and
+// must be set on a later open that should hit a sidecar built from a
+// past-EOF tail. WithSegmentIndex and WithSegmentIndexTrustIdentity do not
+// change the path that is written or the bytes in it. The write is the
+// conventional sidecar for path, not a sidecar named by WithSegmentIndex.
+func BuildSegmentIndex(path string, opts ...ReaderOption) error {
+	_, err := BuildSegmentIndexFile(path, opts...)
+	return err
+}
+
+// BuildSegmentIndexFile is BuildSegmentIndex and returns the sidecar path
+// after the write succeeds.
+func BuildSegmentIndexFile(path string, opts ...ReaderOption) (string, error) {
+	cfg := applyReaderOptions(opts)
+	rf, err := os.Open(path)
+	if err != nil {
+		return "", wrap("index", path, err)
+	}
+	defer rf.Close()
+	var ropts []ReaderOption
+	if cfg.bufSize > 0 {
+		ropts = append(ropts, WithReadBuffer(cfg.bufSize))
+	}
+	if cfg.lenientTail {
+		ropts = append(ropts, WithLenientTail())
+	}
+	tf, err := newReader(rf, path, ropts...)
+	if err != nil {
+		return "", err
+	}
+	side := SegmentIndexPath(path)
+	werr := tf.writeSegmentIndex(side)
+	tf.Close()
+	if werr != nil {
+		return "", wrap("index", side, werr)
+	}
+	return side, nil
+}
+
+// SegmentIndexValid reports whether SegmentIndexPath(path) matches path.
+// The check is the default one: size, modification time, device, inode, and
+// the lead-in and metadata fingerprint. It does not write. WithSegmentIndex
+// and WithSegmentIndexTrustIdentity are ignored, so a caller cannot weaken
+// the check. WithLenientTail is honored and must match the open that built
+// the sidecar when the file's final next-segment offset runs past EOF.
+//
+// A missing sidecar, a decode error, or an identity or fingerprint mismatch
+// is false, nil. An error opening path, reading the sidecar, or walking
+// lead-ins is returned.
+func SegmentIndexValid(path string, opts ...ReaderOption) (bool, error) {
+	cfg := applyReaderOptions(opts)
+	rf, err := os.Open(path)
+	if err != nil {
+		return false, wrap("index", path, err)
+	}
+	defer rf.Close()
+	fi, err := rf.Stat()
+	if err != nil {
+		return false, wrap("index", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return false, nil
+	}
+	side := SegmentIndexPath(path)
+	sf, err := os.Stat(side)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, wrap("index", side, err)
+	}
+	if sf.Size() == 0 || sf.Size() > segmentIndexMaxSize {
+		return false, nil
+	}
+	blob, err := os.ReadFile(side)
+	if err != nil {
+		return false, wrap("index", side, err)
+	}
+	img, err := decodeSegmentIndex(blob)
+	if err != nil {
+		return false, nil
+	}
+	dev, ino := fileIdentity(fi)
+	if img.size != fi.Size() || img.mtime != fi.ModTime().UnixNano() || img.dev != dev || img.ino != ino {
+		return false, nil
+	}
+	if img.truncated && !cfg.lenientTail {
+		return false, nil
+	}
+	fp, err := segmentFingerprint(rf, fi.Size(), cfg.lenientTail)
+	if err != nil {
+		return false, wrap("index", path, err)
+	}
+	return fp == img.fp, nil
 }
 
 // SegmentIndexUsed reports whether this File was restored from a segment-index
@@ -229,7 +350,7 @@ func (f *File) SegmentIndexUsed() bool {
 // Raw sample bytes are not included.
 func segmentFingerprint(r interface {
 	ReadAt(p []byte, off int64) (int, error)
-}, size int64) (uint32, error) {
+}, size int64, lenient bool) (uint32, error) {
 	if size == 0 {
 		return 0, ErrTruncated
 	}
@@ -250,7 +371,7 @@ func segmentFingerprint(r interface {
 		if lead.version != Version10 && lead.version != Version20 {
 			return 0, ErrVersion
 		}
-		segEnd, _, _, err := segmentBounds(pos, size, lead, false)
+		segEnd, _, _, err := segmentBounds(pos, size, lead, lenient)
 		if err != nil {
 			return 0, err
 		}
@@ -298,6 +419,9 @@ func encodeSegmentIndex(f *File, size, mtime int64, dev, ino uint64, fp uint32) 
 	}
 	if f.partialTail {
 		flags |= indexFlagPartial
+	}
+	if f.truncated {
+		flags |= indexFlagTruncated
 	}
 	binary.LittleEndian.PutUint32(buf[56:60], flags)
 	binary.LittleEndian.PutUint64(buf[64:72], uint64(f.unusedTail))
@@ -384,7 +508,11 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 		segs:       int(binary.LittleEndian.Uint32(b[52:56])),
 		incomplete: flags&indexFlagIncomplete != 0,
 		partial:    flags&indexFlagPartial != 0,
+		truncated:  flags&indexFlagTruncated != 0,
 		unused:     int64(binary.LittleEndian.Uint64(b[64:72])),
+	}
+	if img.incomplete && img.truncated {
+		return nil, errIndex
 	}
 	if img.version != Version10 && img.version != Version20 {
 		return nil, errIndex
@@ -392,10 +520,10 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 	if img.segs < 1 {
 		return nil, errIndex
 	}
-	if img.partial && !img.incomplete {
+	if img.partial && !img.incomplete && !img.truncated {
 		return nil, errIndex
 	}
-	if img.unused < 0 || (img.unused > 0 && !img.incomplete) {
+	if img.unused < 0 || (img.unused > 0 && !img.incomplete && !img.truncated) {
 		return nil, errIndex
 	}
 	r := ixr{b: payload}
@@ -470,7 +598,7 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 				if sp.live {
 					anyLive = true
 				}
-				if sp.live && !img.incomplete {
+				if sp.live && !img.incomplete && !img.truncated {
 					return nil, errIndex
 				}
 				spans[k] = sp
@@ -510,7 +638,7 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 	if r.remain() != 0 {
 		return nil, errIndex
 	}
-	if anyLive && !img.incomplete {
+	if anyLive && !img.incomplete && !img.truncated {
 		return nil, errIndex
 	}
 	if err := spansInFile(img); err != nil {
