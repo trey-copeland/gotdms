@@ -174,7 +174,7 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 func TestSegmentIndexV010MissesVersion2(t *testing.T) {
 	out, err := exec.Command("git", "show", "v0.1.0:segindex.go").Output()
 	if err != nil {
-		t.Fatalf("v0.1.0 tag is not in this checkout: %v", err)
+		t.Fatalf("v0.1.0 tag is not in this checkout; fetch full history and tags (actions/checkout fetch-depth: 0 and fetch-tags: true): %v", err)
 	}
 	src := string(out)
 	if !strings.Contains(src, "segmentIndexVersion = 1") {

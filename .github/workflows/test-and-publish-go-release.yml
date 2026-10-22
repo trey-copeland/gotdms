@@ -20,7 +20,11 @@ jobs:
     name: test and create GitHub release
     runs-on: ubuntu-latest
     steps:
+      # Same checkout as build-and-test-go-module.yml. Tests read older tags.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
