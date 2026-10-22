@@ -53,12 +53,38 @@ func TestBuildSegmentIndexUnwritableDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
-	err := BuildSegmentIndex(path)
-	if err == nil {
+	// Unix mode bits make the directory unwritable. Windows keeps the
+	// directory writable, so a create probe selects that host's failure.
+	probe, probeErr := os.CreateTemp(dir, ".probe-*")
+	if probeErr != nil {
+		err := BuildSegmentIndex(path)
+		if err == nil {
+			t.Fatal("expected a write error")
+		}
+		if _, statErr := os.Stat(SegmentIndexPath(path)); !os.IsNotExist(statErr) {
+			t.Fatalf("sidecar after failed write: %v", statErr)
+		}
+		return
+	}
+	probe.Close()
+	os.Remove(probe.Name())
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A non-empty directory at the sidecar path fails the atomic rename.
+	// os.Remove of that directory fails, so the write error is returned.
+	side := SegmentIndexPath(path)
+	if err := os.Mkdir(side, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(side, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildSegmentIndex(path); err == nil {
 		t.Fatal("expected a write error")
 	}
-	if _, statErr := os.Stat(SegmentIndexPath(path)); !os.IsNotExist(statErr) {
-		t.Fatalf("sidecar after failed write: %v", statErr)
+	if _, err := os.Stat(filepath.Join(side, "keep")); err != nil {
+		t.Fatalf("failed write removed the blocking sidecar path: %v", err)
 	}
 }
 
@@ -179,18 +205,33 @@ func TestSegmentIndexTrustIdentityMissesSizeMtimeIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		dev, ino := fileIdentity(fi2)
-		if dev == origDev && ino == origIno {
-			t.Fatal("replaced file kept device and inode")
-		}
-		if fi2.Size() != fi.Size() || fi2.ModTime().UnixNano() != fi.ModTime().UnixNano() {
-			t.Fatalf("size %d/%d mtime %d/%d", fi2.Size(), fi.Size(), fi2.ModTime().UnixNano(), fi.ModTime().UnixNano())
-		}
 		before := segmentParses.Load()
 		f, err := openTrust(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer f.Close()
+		if dev == origDev && ino == origIno {
+			if origDev != 0 || origIno != 0 {
+				t.Fatal("replaced file kept device and inode")
+			}
+			// fileIdentity is 0,0 where the platform has no device or inode
+			// (Windows). A same-size, same-mtime replace stays a trust hit.
+			same := fi2.Size() == fi.Size() && fi2.ModTime().UnixNano() == fi.ModTime().UnixNano()
+			if same {
+				if !f.SegmentIndexUsed() || segmentParses.Load() != before {
+					t.Fatal("platform without device and inode should trust a same-size, same-mtime replace")
+				}
+				return
+			}
+			if f.SegmentIndexUsed() {
+				t.Fatal("trusted a replace whose size or mtime did not match")
+			}
+			return
+		}
+		if fi2.Size() != fi.Size() || fi2.ModTime().UnixNano() != fi.ModTime().UnixNano() {
+			t.Fatalf("size %d/%d mtime %d/%d", fi2.Size(), fi.Size(), fi2.ModTime().UnixNano(), fi.ModTime().UnixNano())
+		}
 		if f.SegmentIndexUsed() || segmentParses.Load() == before {
 			t.Fatal("replaced file was trusted")
 		}

@@ -94,35 +94,37 @@ func indexOne(path string, force, check bool, stdout, stderr io.Writer) error {
 }
 
 func expandIndexArg(arg string) ([]string, error) {
-	fi, err := os.Stat(arg)
-	if err == nil {
-		if !fi.IsDir() {
-			return []string{arg}, nil
+	// Stat of a pattern is an invalid-name error on Windows, not
+	// ErrNotExist, so patterns are expanded before any Stat.
+	if hasGlobMeta(arg) {
+		matches, err := filepath.Glob(arg)
+		if err != nil {
+			return nil, err
 		}
-		return tdmsInDir(arg)
+		var out []string
+		for _, m := range matches {
+			st, serr := os.Stat(m)
+			if serr != nil || !st.Mode().IsRegular() {
+				continue
+			}
+			if strings.EqualFold(filepath.Ext(m), ".tdms") {
+				out = append(out, m)
+			}
+		}
+		sort.Strings(out)
+		if len(out) == 0 {
+			return nil, fmt.Errorf("no .tdms files")
+		}
+		return out, nil
 	}
-	if !os.IsNotExist(err) || !hasGlobMeta(arg) {
+	fi, err := os.Stat(arg)
+	if err != nil {
 		return nil, err
 	}
-	matches, gerr := filepath.Glob(arg)
-	if gerr != nil {
-		return nil, gerr
+	if !fi.IsDir() {
+		return []string{arg}, nil
 	}
-	var out []string
-	for _, m := range matches {
-		st, serr := os.Stat(m)
-		if serr != nil || !st.Mode().IsRegular() {
-			continue
-		}
-		if strings.EqualFold(filepath.Ext(m), ".tdms") {
-			out = append(out, m)
-		}
-	}
-	sort.Strings(out)
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no .tdms files")
-	}
-	return out, nil
+	return tdmsInDir(arg)
 }
 
 func tdmsInDir(dir string) ([]string, error) {

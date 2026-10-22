@@ -99,7 +99,10 @@ func WithSegmentIndex(sidecar string) ReaderOption {
 // The option does nothing unless WithSegmentIndex names a sidecar. It does
 // not change what BuildSegmentIndex writes. A sidecar whose final segment
 // was recovered with WithLenientTail is still a miss when this open is not
-// lenient, so a strict Open keeps returning ErrTruncated.
+// lenient, so a strict Open keeps returning ErrTruncated. Where the platform
+// reports a device and inode, replacing the file is a miss even when size
+// and modification time were copied onto the new file. Where both are 0,
+// only size and modification time are compared.
 func WithSegmentIndexTrustIdentity() ReaderOption {
 	return func(c *readerConfig) {
 		c.indexTrustIdentity = true
