@@ -1,19 +1,5 @@
 package tdms
 
-// coalesceAll folds each channel's consecutive regular spans into runs.
-// Values, Slice, and Cursor walk a run in place. They do not allocate one
-// span per segment.
-func (f *File) coalesceAll() {
-	if f == nil {
-		return
-	}
-	for _, g := range f.groups {
-		for _, ch := range g.channels {
-			coalesceChannel(ch)
-		}
-	}
-}
-
 func (img *indexImage) coalesce() {
 	if img == nil {
 		return
@@ -44,9 +30,10 @@ func coalesceChannel(ch *Channel) {
 }
 
 // coalesceSpans merges consecutive spans that share a layout and whose data
-// positions advance by a constant step. A string, a live span, a partial
-// tail, or a span that is already a run stays as it is: a run of runs is not
-// folded again, so decoding a version 2 sidecar does not rebuild it.
+// positions advance by a constant step. A string, a live span, or a partial
+// tail stays as it is. An existing run keeps its count and step and may
+// absorb the single segments that continue it, but is never folded into an
+// earlier span. Only version 1 sidecars are coalesced on decode.
 func coalesceSpans(in []span, runs []spanRun) ([]span, []spanRun) {
 	if len(in) == 0 {
 		return in, runs
@@ -92,11 +79,21 @@ func coalesceSpans(in []span, runs []spanRun) ([]span, []spanRun) {
 	}
 	out := make([]span, 0, n)
 	built := make([]spanRun, 1, n+1)
-	cur = normRun(in[0])
-	cur.runIdx = 0
+	// A span that is already a run keeps its count and step: its record
+	// moves into the new table. Dropping the index would turn the run back
+	// into one segment and lose its other repeats.
+	carry := func(sp span) span {
+		if sp.runIdx == 0 {
+			return sp
+		}
+		count, step := sp.repeats(runs), sp.repeatStep(runs)
+		sp.runIdx = 0
+		built = sp.setRun(built, count, step)
+		return sp
+	}
+	cur = carry(normRun(in[0]))
 	for i := 1; i < len(in); i++ {
-		next := normRun(in[i])
-		next.runIdx = 0
+		next := carry(normRun(in[i]))
 		if cur.nPerChunk != next.nPerChunk || cur.nChunks != next.nChunks || cur.typeSize != next.typeSize {
 			out = append(out, cur)
 			cur = next
