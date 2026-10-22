@@ -30,6 +30,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ### Fixed
 
+- `ReadValues` and `Group.Values` add each channel's base sample index when splitting an interleaved span. A channel whose interleaved data continued in a later segment was written at the start of its output. This also affects v0.1.0.
 - A metadata-only segment that declares a raw-data index, or that changes the object list, updates the order a following raw-only segment uses. A channel that drops out is not given another channel's samples. A raw section whose length is not a multiple of the current chunk, and that is not an incomplete or lenient tail, returns `ErrCorrupt`.
 - Length-prefixed strings drop one trailing NUL on read, which is what the TDMS article specifies. A NUL that is not the last byte is kept. The writer does not add one. A string that ends in NUL does not round-trip that byte.
 - Dataset waveform windows and positive-step timestamp windows read the sample range with `CursorAt` and `Slice`. Samples before the window are not decoded. A clock that does not match the catalog step is still decoded in full.

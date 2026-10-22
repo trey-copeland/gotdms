@@ -17,9 +17,8 @@ func fileIdentity(fi os.FileInfo) (dev, ino uint64) { return 0, 0 }
 // tell it from the file the sidecar was built for even when size and
 // modification time were copied onto the replacement.
 //
-// Fd puts the descriptor into blocking mode. The TDMS reader uses ReadAt,
-// which wants that mode. A failed call is returned: storing 0, 0 would make
-// trust mode treat every unreadable handle as the same file.
+// A failed call is returned: storing 0, 0 would make trust mode treat every
+// unreadable handle as the same file.
 func fileID(f *os.File) (dev, ino uint64, err error) {
 	if f == nil {
 		return 0, 0, os.ErrInvalid

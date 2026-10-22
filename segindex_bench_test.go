@@ -23,6 +23,16 @@ type fragKey struct {
 	every int
 }
 
+func TestMain(m *testing.M) {
+	code := m.Run()
+	fragmentedFiles.Lock()
+	for _, p := range fragmentedFiles.paths {
+		os.RemoveAll(filepath.Dir(p))
+	}
+	fragmentedFiles.Unlock()
+	os.Exit(code)
+}
+
 func fragmentedTDMS(b *testing.B, segs, every int) string {
 	b.Helper()
 	fragmentedFiles.Lock()

@@ -319,7 +319,12 @@ func splitRows(r io.ReaderAt, members []ileaveMember, out []any, region, stride,
 		}
 		at := spanAt + int(done)
 		for _, m := range members {
-			if err := scatter(m, out[m.req], scratch, int(stride), at, int(take)); err != nil {
+			// at is relative to this span. Each member's span starts at its
+			// own sample index in its channel, so add that base per member.
+			if m.sampleBase < 0 || at > math.MaxInt-m.sampleBase {
+				return wrap("read", m.ch.path, ErrCorrupt)
+			}
+			if err := scatter(m, out[m.req], scratch, int(stride), m.sampleBase+at, int(take)); err != nil {
 				return wrap("read", m.ch.path, err)
 			}
 		}

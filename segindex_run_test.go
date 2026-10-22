@@ -109,7 +109,7 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 		}
 		parsed := mustOpen(t, path)
 		defer parsed.Close()
-		blob, err := encodeSegmentIndexVer(parsed, fi.Size(), fi.ModTime().UnixNano(), dev, ino, fp, segmentIndexV1)
+		blob, err := encodeSegmentIndexV1(parsed, fi.Size(), fi.ModTime().UnixNano(), dev, ino, fp)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,9 +142,7 @@ func TestSegmentIndexRunsMatchParse(t *testing.T) {
 func TestSegmentIndexV010MissesVersion2(t *testing.T) {
 	out, err := exec.Command("git", "show", "v0.1.0:segindex.go").Output()
 	if err != nil {
-		// Shallow CI checkouts do not fetch tags. The check still runs when
-		// v0.1.0 is present: that decoder accepts only version 1.
-		t.Skipf("v0.1.0 tag is not in this checkout: %v", err)
+		t.Fatalf("v0.1.0 tag is not in this checkout: %v", err)
 	}
 	src := string(out)
 	if !strings.Contains(src, "segmentIndexVersion = 1") {
@@ -238,7 +236,6 @@ func TestSegmentIndexSampleCapMiss(t *testing.T) {
 		assertCapMiss(t, path, blob)
 	})
 	t.Run("many spans", func(t *testing.T) {
-		one := c.spans[0]
 		// The previous subtest replaced spans. Rebuild from a fresh open.
 		fresh, err := Open(path)
 		if err != nil {
@@ -246,7 +243,7 @@ func TestSegmentIndexSampleCapMiss(t *testing.T) {
 		}
 		defer fresh.Close()
 		fc := chIn(t, fresh, "g", "c")
-		one = fc.spans[0]
+		one := fc.spans[0]
 		const n = 10000
 		fc.spans = make([]span, n)
 		var total int64

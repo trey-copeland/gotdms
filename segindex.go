@@ -88,6 +88,10 @@ const (
 	spanRecordV1 = 96
 )
 
+// segmentIndexLimit is segmentIndexMaxSize. Tests lower it to exercise the
+// over-limit write without building a 64 MiB sidecar.
+var segmentIndexLimit int64 = segmentIndexMaxSize
+
 // SegmentIndexPath is the conventional sidecar for a TDMS file: path plus
 // ".gtdx". Pass it to WithSegmentIndex. The file is not an NI *.tdms_index
 // (TDSh) companion.
@@ -212,7 +216,7 @@ func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, pre dataStat)
 		return false
 	}
 	sf, err := os.Stat(sidecar)
-	if err != nil || sf.Size() == 0 || sf.Size() > segmentIndexMaxSize {
+	if err != nil || sf.Size() == 0 || sf.Size() > segmentIndexLimit {
 		return false
 	}
 	blob, err := os.ReadFile(sidecar)
@@ -297,6 +301,12 @@ func (f *File) writeSegmentIndex(sidecar string, pre dataStat) error {
 	blob, err := encodeSegmentIndex(f, now.fi.Size(), now.fi.ModTime().UnixNano(), now.dev, now.ino, fp)
 	if err != nil {
 		return err
+	}
+	// A sidecar over the read limit is never accepted. Writing it anyway
+	// costs a large write on every open and reports success for a cache
+	// that cannot hit.
+	if int64(len(blob)) > segmentIndexLimit {
+		return fmt.Errorf("segment index: sidecar would be %d bytes, over the %d-byte limit", len(blob), segmentIndexLimit)
 	}
 	return writeAtomic(sidecar, blob, sidecarPerm(now.fi))
 }
@@ -397,7 +407,7 @@ func SegmentIndexValid(path string, opts ...ReaderOption) (bool, error) {
 		}
 		return false, wrap("index", side, err)
 	}
-	if sf.Size() == 0 || sf.Size() > segmentIndexMaxSize {
+	if sf.Size() == 0 || sf.Size() > segmentIndexLimit {
 		return false, nil
 	}
 	blob, err := os.ReadFile(side)
@@ -490,22 +500,22 @@ func encodeSegmentIndex(f *File, size, mtime int64, dev, ino uint64, fp uint32) 
 }
 
 // encodeSegmentIndexVer writes a version 2 sidecar, or a version 1 sidecar
-// with one span per segment. Version 1 exists so tests can check that an
-// older sidecar still hits. New writes use encodeSegmentIndex.
+// of the spans as they stand (96 bytes each, no run fields). Version 1
+// exists so tests can check that an older sidecar still hits. A test that
+// wants one span per segment expands runs first. New writes use
+// encodeSegmentIndex.
 func encodeSegmentIndexVer(f *File, size, mtime int64, dev, ino uint64, fp uint32, version uint32) ([]byte, error) {
 	if version != segmentIndexV1 && version != segmentIndexVersion {
 		return nil, errIndex
 	}
-	var payload []byte
-	var err error
-	if version == segmentIndexVersion {
-		payload, err = encodeIndexPayload(f, true)
-	} else {
-		payload, err = encodeIndexPayloadV1(f)
-	}
+	payload, err := encodeIndexPayload(f, version == segmentIndexVersion)
 	if err != nil {
 		return nil, err
 	}
+	return finishSegmentIndex(f, payload, size, mtime, dev, ino, fp, version)
+}
+
+func finishSegmentIndex(f *File, payload []byte, size, mtime int64, dev, ino uint64, fp, version uint32) ([]byte, error) {
 	buf := make([]byte, segmentIndexHeader+len(payload))
 	copy(buf[0:4], segmentIndexMagic)
 	binary.LittleEndian.PutUint32(buf[4:8], version)
@@ -747,6 +757,9 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 			}
 			if !ch.hasDT && (ch.dt != TypeVoid || len(ch.spans) != 0 || ch.total != 0) {
 				return nil, errIndex
+			}
+			if err := spanTypesMatch(ch.dt, ch.spans); err != nil {
+				return nil, err
 			}
 			g.channels = append(g.channels, ch)
 		}
@@ -1341,4 +1354,36 @@ func replaceFile(tmp, dst string) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// spanTypesMatch rejects a span whose sample width is not the channel data
+// type's width. A fresh parse always sets typeSize from the data type, and
+// readers size their output buffers from the data type, so a mismatch from
+// a crafted sidecar would otherwise index past those buffers.
+func spanTypesMatch(dt DataType, spans []span) error {
+	if dt == TypeString {
+		for i := range spans {
+			if !spans[i].str {
+				return errIndex
+			}
+		}
+		return nil
+	}
+	sz, ok := dt.Size()
+	for i := range spans {
+		if spans[i].str {
+			return errIndex
+		}
+		n, err := spanSamples(&spans[i])
+		if err != nil {
+			return errIndex
+		}
+		if n == 0 {
+			continue
+		}
+		if !ok || spans[i].typeSize != sz {
+			return errIndex
+		}
+	}
+	return nil
 }

@@ -234,6 +234,11 @@ func fillPackedSpans(spans []span, dt DataType, r io.ReaderAt, start, n, size in
 		if take > int64(need) {
 			take = int64(need)
 		}
+		if sp.typeSize != size {
+			// The output is sized by the data type. A span of another
+			// width would write past it.
+			return ErrCorrupt
+		}
 		region := dst[filled*size : (filled+int(take))*size]
 		if err := sp.copyValues(r, pos, take, region); err != nil {
 			return err
