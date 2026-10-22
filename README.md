@@ -334,7 +334,18 @@ An open uses the sidecar only when every one of those checks matches the file it
 
 `gotdms index [--force] [--check] file.tdms...` writes one sidecar per file. Several file arguments, a directory of `.tdms` files, or a pattern are accepted. Without `--force`, a sidecar that already matches is left in place. `--check` reports whether each existing sidecar matches and does not write. The process exits non-zero if any file fails.
 
-`BenchmarkSegmentIndexOpen` opens a synthetic file of many raw-only segments (four `float64` channels, one sample each per segment) three ways: no sidecar, a default sidecar hit, and a trust-identity hit. Two sizes are measured, 10,000 segments and 100,000 segments. The file and its sidecar are built once, outside the timed loop. Figures below are medians of 10 runs (`go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10`, default benchtime). Each median is the average of the 5th and 6th sorted runs. Machine and results are filled in from the measurement on this host.
+`BenchmarkSegmentIndexOpen` opens a synthetic file of many raw-only segments three ways: no sidecar, a default sidecar hit, and a trust-identity hit. Each segment after the first is a lead-in plus four `float64` samples (one per channel). The 10,000-segment file is 600,187 bytes and its sidecar is 3,840,255 bytes. The 100,000-segment file is 6,000,187 bytes and its sidecar is 38,400,255 bytes. Both files, and their sidecars, are built once, outside the timed loop. Figures are medians of 10 runs (`go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10`, default benchtime). Each median is the average of the 5th and 6th sorted runs. The host is a 4 vCPU Intel Xeon cloud VM, Linux amd64, 16 GiB, Go 1.22.2.
+
+| Segments | Open | Median time | B/op | allocs/op |
+| --- | --- | ---: | ---: | ---: |
+| 10,000 | no sidecar | 10.933 ms | 21,288,124 | 60,119 |
+| 10,000 | sidecar | 6.527 ms | 8,654,805 | 10,048 |
+| 10,000 | trust identity | 3.487 ms | 8,334,599 | 46 |
+| 100,000 | no sidecar | 112.191 ms | 249,252,056 | 600,159 |
+| 100,000 | sidecar | 62.129 ms | 86,434,256 | 100,048 |
+| 100,000 | trust identity | 31.932 ms | 83,234,050 | 46 |
+
+On the 100,000-segment file the default sidecar hit is about 1.81× the no-sidecar open, and the trust-identity hit is about 3.51× that open and about 1.95× the default hit. Trust identity drops the lead-in walk (100,048 allocs/op down to 46). Most of the remaining time and bytes are decoding the 37 MiB sidecar into spans. A file whose metadata is small relative to its segment count benefits more; a sidecar that is itself tens of megabytes still has to be read.
 
 ```
 go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10

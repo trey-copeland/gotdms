@@ -37,6 +37,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 ### Changed
 
 - README benchmark table remeasured with `-count=10 -benchtime=100ms`. Medians are by hand (benchstat is not vendored). `Write` of 128 MiB to a file is 1403 MB/s and 129.00 MiB/op after the copy (2989 MB/s and 1.00 MiB/op when the first slice was aliased).
+- `BenchmarkSegmentIndexOpen` medians of 10 runs (default benchtime, average of the 5th and 6th) on a 4 vCPU Intel Xeon, Go 1.22.2. A 100,000-segment file (four float64 channels, one sample per segment): no sidecar 112.191 ms, 249,252,056 B/op, 600,159 allocs/op; default sidecar hit 62.129 ms, 86,434,256 B/op, 100,048 allocs/op; trust-identity hit 31.932 ms, 83,234,050 B/op, 46 allocs/op. The 10,000-segment file: 10.933 ms / 6.527 ms / 3.487 ms for those three opens.
 - Dataset tail-window README figures are medians of 10 runs (`-count=10`, default benchtime) on a 4 vCPU cloud VM, a synthetic 1,048,576-sample file, and a 64-sample window. `BenchmarkReadWindowTail` is 27.32 µs, 8,398 B/op, and 66 allocs/op (was 28.46 ms, 41,948,728 B/op, and 60 allocs/op). `BenchmarkReadWindowTailWaveform` is 14.80 µs, 6,909 B/op, and 63 allocs/op (was 599.6 µs, 71,040 B/op, and 60 allocs/op).
 - Extended-float comments state that the 10-byte layout is spec-derived and has no NI fixture. The bytes are unchanged.
 
