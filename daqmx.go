@@ -856,7 +856,7 @@ func (f *File) addDAQmxSpans(slots []rawSlot, dataPos, rawLen int64, big, live b
 			if err != nil {
 				return 0, err
 			}
-			st.spans[k] = append(st.spans[k], sp)
+			st.spans[k] = appendSpan(st.spans[k], sp)
 			st.totals[k], err = add64(st.totals[k], add)
 			if err != nil {
 				return 0, err
@@ -864,7 +864,7 @@ func (f *File) addDAQmxSpans(slots []rawSlot, dataPos, rawLen int64, big, live b
 			if k != spec.primary {
 				continue
 			}
-			s.ch.spans = append(s.ch.spans, sp)
+			s.ch.spans = appendSpan(s.ch.spans, sp)
 			s.ch.total, err = add64(s.ch.total, add)
 			if err != nil {
 				return 0, err
@@ -1090,7 +1090,7 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryTotal int64, primaryDT Data
 			st.totals[i] = primaryTotal
 			continue
 		}
-		nspan, err := r.count(spanRecord)
+		nspan, err := r.count(r.spanSize)
 		if err != nil {
 			return nil, err
 		}

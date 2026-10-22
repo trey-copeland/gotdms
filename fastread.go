@@ -222,7 +222,7 @@ func fillPackedSpans(spans []span, dt DataType, r io.ReaderAt, start, n, size in
 			break
 		}
 		sp := &spans[i]
-		avail, err := add64(mustMul(sp.nChunks, sp.nPerChunk), sp.partialN)
+		avail, err := spanSamples(sp)
 		if err != nil {
 			return err
 		}

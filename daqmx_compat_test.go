@@ -298,7 +298,7 @@ func TestDAQmxSidecarRejectsBadScalerType(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	payload, err := encodeIndexPayload(f)
+	payload, err := encodeIndexPayload(f, true)
 	if err != nil {
 		t.Fatal(err)
 	}

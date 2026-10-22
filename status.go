@@ -83,11 +83,19 @@ func (c *Channel) committed() int64 {
 		return 0
 	}
 	var n int64
-	for _, sp := range c.spans {
+	for i := range c.spans {
+		sp := &c.spans[i]
 		if sp.live {
 			continue
 		}
-		n += sp.nChunks*sp.nPerChunk + sp.partialN
+		s, err := spanSamples(sp)
+		if err != nil {
+			return 0
+		}
+		n, err = add64(n, s)
+		if err != nil {
+			return 0
+		}
 	}
 	return n
 }

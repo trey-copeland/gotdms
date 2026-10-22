@@ -136,6 +136,7 @@ type ileaveKey struct {
 	nChunks, nPerChunk         int64
 	partialPos, partialStride  int64
 	partialN                   int64
+	runStep, runCount          int64
 	big                        bool
 }
 
@@ -147,10 +148,15 @@ type ileaveMember struct {
 }
 
 func ileaveKeyOf(sp *span) ileaveKey {
+	rc := sp.runCount
+	if rc < 1 {
+		rc = 1
+	}
 	return ileaveKey{
 		dataPos: sp.dataPos, chunkSize: sp.chunkSize, stride: sp.stride,
 		nChunks: sp.nChunks, nPerChunk: sp.nPerChunk,
 		partialPos: sp.partialPos, partialStride: sp.partialStride, partialN: sp.partialN,
+		runStep: sp.runStep, runCount: rc,
 		big: sp.big,
 	}
 }
@@ -166,7 +172,21 @@ func interleavedSpan(sp *span) bool {
 }
 
 func spanSamples(sp *span) (int64, error) {
-	return add64(mustMul(sp.nChunks, sp.nPerChunk), sp.partialN)
+	one, err := mul64(sp.nChunks, sp.nPerChunk)
+	if err != nil {
+		return 0, err
+	}
+	one, err = add64(one, sp.partialN)
+	if err != nil {
+		return 0, err
+	}
+	if sp.runCount <= 1 {
+		return one, nil
+	}
+	if sp.partialN != 0 || sp.runStep <= 0 || sp.str || sp.live {
+		return 0, ErrCorrupt
+	}
+	return mul64(sp.runCount, one)
 }
 
 func (c *Channel) readSpanInto(r io.ReaderAt, sp *span, dst any, dstSample, n int) error {
@@ -201,24 +221,49 @@ func splitInterleaved(r io.ReaderAt, members []ileaveMember, out []any) error {
 		return wrap("read", members[0].ch.path, ErrCorrupt)
 	}
 	for _, m := range members[1:] {
-		if m.sp.nChunks != sp0.nChunks || m.sp.nPerChunk != sp0.nPerChunk || m.sp.stride != sp0.stride || m.sp.partialN != sp0.partialN || m.sp.dataPos != sp0.dataPos {
+		if m.sp.nChunks != sp0.nChunks || m.sp.nPerChunk != sp0.nPerChunk || m.sp.stride != sp0.stride || m.sp.partialN != sp0.partialN || m.sp.dataPos != sp0.dataPos || m.sp.runCount != sp0.runCount || m.sp.runStep != sp0.runStep {
 			return wrap("read", m.ch.path, ErrCorrupt)
 		}
 	}
-	for chunk := int64(0); chunk < sp0.nChunks; chunk++ {
-		base, err := add64(sp0.dataPos, mustMul(chunk, sp0.chunkSize))
+	reps := int64(1)
+	if sp0.runCount > 1 {
+		reps = sp0.runCount
+	}
+	per, err := mul64(sp0.nChunks, sp0.nPerChunk)
+	if err != nil {
+		return wrap("read", members[0].ch.path, err)
+	}
+	for rep := int64(0); rep < reps; rep++ {
+		origin := sp0.dataPos
+		if rep > 0 {
+			shift, err := mul64(rep, sp0.runStep)
+			if err != nil {
+				return wrap("read", members[0].ch.path, err)
+			}
+			origin, err = add64(sp0.dataPos, shift)
+			if err != nil {
+				return wrap("read", members[0].ch.path, err)
+			}
+		}
+		baseAt, err := mul64(rep, per)
 		if err != nil {
 			return wrap("read", members[0].ch.path, err)
 		}
-		off, err := mul64(chunk, sp0.nPerChunk)
-		if err != nil || off > int64(math.MaxInt) {
-			return wrap("read", members[0].ch.path, ErrCorrupt)
-		}
-		if err := splitRows(r, members, out, base, sp0.stride, sp0.nPerChunk, int(off)); err != nil {
-			return err
+		for chunk := int64(0); chunk < sp0.nChunks; chunk++ {
+			base, err := add64(origin, mustMul(chunk, sp0.chunkSize))
+			if err != nil {
+				return wrap("read", members[0].ch.path, err)
+			}
+			off, err := add64(baseAt, mustMul(chunk, sp0.nPerChunk))
+			if err != nil || off > int64(math.MaxInt) {
+				return wrap("read", members[0].ch.path, ErrCorrupt)
+			}
+			if err := splitRows(r, members, out, base, sp0.stride, sp0.nPerChunk, int(off)); err != nil {
+				return err
+			}
 		}
 	}
-	if sp0.partialN > 0 {
+	if sp0.partialN > 0 && reps <= 1 {
 		off, err := mul64(sp0.nChunks, sp0.nPerChunk)
 		if err != nil || off > int64(math.MaxInt) {
 			return wrap("read", members[0].ch.path, ErrCorrupt)

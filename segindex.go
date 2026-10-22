@@ -10,11 +10,11 @@ import (
 	"syscall"
 )
 
-// Segment-index sidecar, version 1. Little-endian. This is not an NI
+// Segment-index sidecar, version 2. Little-endian. This is not an NI
 // *.tdms_index (TDSh) file; the magic is the four bytes GTDX.
 //
 //	0   4   magic "GTDX"
-//	4   4   uint32 version (1)
+//	4   4   uint32 version (2; version 1 is still accepted)
 //	8   8   int64  data file size
 //	16  8   int64  modification time, Unix nanoseconds
 //	24  8   uint64 device id (0 when the platform has none)
@@ -35,12 +35,17 @@ import (
 // group is a length-prefixed name, its properties, and its channels. Each
 // channel is its name, TDMS path, data type, a has-type byte, properties,
 // spans, and the total sample count. A property is a uint32 byte length and
-// then the TDMS property encoding (name, type, value). A span is 96 bytes:
-// six int64 layout fields (data position, chunk size, chunk count, values per
-// chunk, column, stride), a uint32 type size, a uint32 flag word (bit 0 big
-// endian, bit 1 string, bit 2 live/incomplete segment), then five int64 fields
-// (string block size, partial count, partial position, partial column,
-// partial stride).
+// then the TDMS property encoding (name, type, value). A version 2 span is
+// 112 bytes: six int64 layout fields (data position, chunk size, chunk count,
+// values per chunk, column, stride), a uint32 type size, a uint32 flag word
+// (bit 0 big endian, bit 1 string, bit 2 live/incomplete segment), five int64
+// fields (string block size, partial count, partial position, partial column,
+// partial stride), then int64 run step and int64 run count. Run count is the
+// number of consecutive segments that share that layout, with data positions
+// dataPos+i*runStep. Count 1 and step 0 are a single segment. Version 1 spans
+// are the same 96 bytes without the run fields, one segment each, and still
+// decode. A v0.1.0 reader rejects any version other than 1, so it treats a
+// version 2 sidecar as a miss.
 //
 // Invalidation: size, modification time, device, inode, fingerprint, and the
 // payload checksum must all match. Any miss, or any decode error, discards
@@ -61,7 +66,8 @@ import (
 
 const (
 	segmentIndexMagic   = "GTDX"
-	segmentIndexVersion = 1
+	segmentIndexVersion = 2
+	segmentIndexV1      = 1
 	segmentIndexHeader  = 72
 	segmentIndexMaxSize = 64 << 20
 
@@ -76,15 +82,19 @@ const (
 	spanFlagSolo    = 1 << 4
 	spanBitShift    = 8
 
-	// spanRecord is the on-disk size of one span. See SegmentIndexPath.
-	spanRecord = 96
+	// spanRecord is the on-disk size of one version 2 span, including the run
+	// step and run count. spanRecordV1 is the version 1 size, without them.
+	spanRecord   = 112
+	spanRecordV1 = 96
 )
 
 // SegmentIndexPath is the conventional sidecar for a TDMS file: path plus
 // ".gtdx". Pass it to WithSegmentIndex. The file is not an NI *.tdms_index
 // (TDSh) companion.
 //
-// The sidecar is little-endian, version 1, magic "GTDX", with a 72-byte header:
+// The sidecar is little-endian, version 2, magic "GTDX", with a 72-byte header.
+// Version 1 sidecars still decode. A v0.1.0 reader accepts only version 1, so
+// a version 2 sidecar is a cache miss for that release.
 //
 //	0   magic
 //	4   uint32 version
@@ -103,13 +113,18 @@ const (
 //	72  payload: file properties, groups, channels, and spans
 //
 // A property is a uint32 length and the ordinary TDMS property encoding.
-// A span is 96 bytes: data position, chunk size, chunk count, values per
-// chunk, column, stride, type size, a flag word, string block size, and the
-// partial-chunk position fields. The flag word is big-endian, string, live,
-// digital line, and a raw buffer that does not start at the chunk
-// (solo). A digital span stores its bit index in bits 8–15. A channel whose
-// has-type byte is 2 is DAQmx: after the channel total, the sidecar stores
-// the scaler vector and any non-primary scaler spans. Invalidation is size,
+// A version 2 span is 112 bytes: data position, chunk size, chunk count,
+// values per chunk, column, stride, type size, a flag word, string block
+// size, the partial-chunk position fields, then the run step and run count.
+// Run count greater than 1 repeats that layout at dataPos+i*runStep. A run
+// is not used for strings, live spans, or a partial tail. Version 1 spans
+// are 96 bytes and describe one segment. The flag word is big-endian,
+// string, live, digital line, and a raw buffer that does not start at the
+// chunk (solo). A digital span stores its bit index in bits 8–15. A channel
+// whose has-type byte is 2 is DAQmx: after the channel total, the sidecar
+// stores the scaler vector and any non-primary scaler spans. The sum of a
+// channel's sample bytes, and of each DAQmx scaler's sample bytes, must fit
+// in the file. Invalidation is size,
 // modification time, device, inode, the metadata fingerprint, and the
 // payload checksum. Raw sample bytes are not in the sidecar.
 func SegmentIndexPath(path string) string {
@@ -142,22 +157,51 @@ func (f *File) dataPath() string {
 	return ""
 }
 
+// dataStat is a stat of the open data file plus the device and file index
+// taken from that same handle. Windows file indexes are not on FileInfo.
+type dataStat struct {
+	fi       os.FileInfo
+	dev, ino uint64
+}
+
 // statData stats the data file through the open handle when the reader
 // has one, so a file replaced at its path after the open is not mistaken for
 // the bytes being read. Other readers fall back to the recorded path.
-func (f *File) statData() (os.FileInfo, error) {
+// Identity comes from the handle (fileID) when the reader is an *os.File.
+// A failed identity call is returned rather than stored as 0, 0.
+func (f *File) statData() (dataStat, error) {
+	if of, ok := f.r.(*os.File); ok {
+		fi, err := of.Stat()
+		if err != nil {
+			return dataStat{}, err
+		}
+		dev, ino, err := fileID(of)
+		if err != nil {
+			return dataStat{}, err
+		}
+		return dataStat{fi: fi, dev: dev, ino: ino}, nil
+	}
+	var fi os.FileInfo
+	var err error
 	if s, ok := f.r.(interface{ Stat() (os.FileInfo, error) }); ok {
-		return s.Stat()
+		fi, err = s.Stat()
+	} else {
+		data := f.dataPath()
+		if data == "" {
+			return dataStat{}, os.ErrNotExist
+		}
+		fi, err = os.Stat(data)
 	}
-	data := f.dataPath()
-	if data == "" {
-		return nil, os.ErrNotExist
+	if err != nil {
+		return dataStat{}, err
 	}
-	return os.Stat(data)
+	dev, ino := fileIdentity(fi)
+	return dataStat{fi: fi, dev: dev, ino: ino}, nil
 }
 
-func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, fi os.FileInfo) bool {
+func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, pre dataStat) bool {
 	data := f.dataPath()
+	fi := pre.fi
 	if data == "" || sidecar == "" || fi == nil {
 		return false
 	}
@@ -179,8 +223,7 @@ func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, fi os.FileInf
 	if err != nil {
 		return false
 	}
-	dev, ino := fileIdentity(fi)
-	if img.size != fi.Size() || img.mtime != fi.ModTime().UnixNano() || img.dev != dev || img.ino != ino {
+	if img.size != fi.Size() || img.mtime != fi.ModTime().UnixNano() || img.dev != pre.dev || img.ino != pre.ino {
 		return false
 	}
 	// A lenient build records a past-EOF tail. A strict open must still
@@ -229,35 +272,33 @@ func (f *File) installIndex(img *indexImage) {
 // The handle is stat'ed again here; a size, modification time, or identity
 // change in between means the parsed tree may not match the bytes the
 // sidecar would be keyed to, so nothing is written.
-func (f *File) writeSegmentIndex(sidecar string, pre os.FileInfo) error {
+func (f *File) writeSegmentIndex(sidecar string, pre dataStat) error {
 	data := f.dataPath()
 	if data == "" || sidecar == "" || filepath.Clean(sidecar) == filepath.Clean(data) {
 		return nil
 	}
-	if pre == nil {
+	if pre.fi == nil {
 		return fmt.Errorf("segment index: no stat of the data file before parse")
 	}
-	fi, err := f.statData()
+	now, err := f.statData()
 	if err != nil {
 		return err
 	}
-	dev, ino := fileIdentity(fi)
-	pdev, pino := fileIdentity(pre)
-	if fi.Size() != f.size || pre.Size() != f.size {
+	if now.fi.Size() != f.size || pre.fi.Size() != f.size {
 		return fmt.Errorf("segment index: file size changed during parse")
 	}
-	if fi.ModTime().UnixNano() != pre.ModTime().UnixNano() || dev != pdev || ino != pino {
+	if now.fi.ModTime().UnixNano() != pre.fi.ModTime().UnixNano() || now.dev != pre.dev || now.ino != pre.ino {
 		return fmt.Errorf("segment index: file changed during parse")
 	}
 	fp, err := segmentFingerprint(f.r, f.size, f.lenient)
 	if err != nil {
 		return err
 	}
-	blob, err := encodeSegmentIndex(f, fi.Size(), fi.ModTime().UnixNano(), dev, ino, fp)
+	blob, err := encodeSegmentIndex(f, now.fi.Size(), now.fi.ModTime().UnixNano(), now.dev, now.ino, fp)
 	if err != nil {
 		return err
 	}
-	return writeAtomic(sidecar, blob, sidecarPerm(fi))
+	return writeAtomic(sidecar, blob, sidecarPerm(now.fi))
 }
 
 // sidecarPerm gives the sidecar the data file's read and write bits, so a
@@ -302,10 +343,15 @@ func BuildSegmentIndexFile(path string, opts ...ReaderOption) (string, error) {
 	if cfg.lenientTail {
 		ropts = append(ropts, WithLenientTail())
 	}
-	pre, err := rf.Stat()
+	fi, err := rf.Stat()
 	if err != nil {
 		return "", wrap("index", path, err)
 	}
+	dev, ino, err := fileID(rf)
+	if err != nil {
+		return "", wrap("index", path, err)
+	}
+	pre := dataStat{fi: fi, dev: dev, ino: ino}
 	tf, err := newReader(rf, path, ropts...)
 	if err != nil {
 		return "", err
@@ -362,7 +408,10 @@ func SegmentIndexValid(path string, opts ...ReaderOption) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	dev, ino := fileIdentity(fi)
+	dev, ino, err := fileID(rf)
+	if err != nil {
+		return false, wrap("index", path, err)
+	}
 	if img.size != fi.Size() || img.mtime != fi.ModTime().UnixNano() || img.dev != dev || img.ino != ino {
 		return false, nil
 	}
@@ -437,13 +486,29 @@ func segmentFingerprint(r interface {
 }
 
 func encodeSegmentIndex(f *File, size, mtime int64, dev, ino uint64, fp uint32) ([]byte, error) {
-	payload, err := encodeIndexPayload(f)
+	return encodeSegmentIndexVer(f, size, mtime, dev, ino, fp, segmentIndexVersion)
+}
+
+// encodeSegmentIndexVer writes a version 2 sidecar, or a version 1 sidecar
+// with one span per segment. Version 1 exists so tests can check that an
+// older sidecar still hits. New writes use encodeSegmentIndex.
+func encodeSegmentIndexVer(f *File, size, mtime int64, dev, ino uint64, fp uint32, version uint32) ([]byte, error) {
+	if version != segmentIndexV1 && version != segmentIndexVersion {
+		return nil, errIndex
+	}
+	var payload []byte
+	var err error
+	if version == segmentIndexVersion {
+		payload, err = encodeIndexPayload(f, true)
+	} else {
+		payload, err = encodeIndexPayloadV1(f)
+	}
 	if err != nil {
 		return nil, err
 	}
 	buf := make([]byte, segmentIndexHeader+len(payload))
 	copy(buf[0:4], segmentIndexMagic)
-	binary.LittleEndian.PutUint32(buf[4:8], segmentIndexVersion)
+	binary.LittleEndian.PutUint32(buf[4:8], version)
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(size))
 	binary.LittleEndian.PutUint64(buf[16:24], uint64(mtime))
 	binary.LittleEndian.PutUint64(buf[24:32], dev)
@@ -471,8 +536,8 @@ func encodeSegmentIndex(f *File, size, mtime int64, dev, ino uint64, fp uint32) 
 	return buf, nil
 }
 
-func encodeIndexPayload(f *File) ([]byte, error) {
-	w := &ixw{}
+func encodeIndexPayload(f *File, v2 bool) ([]byte, error) {
+	w := &ixw{v2: v2}
 	if err := w.props(f.props); err != nil {
 		return nil, err
 	}
@@ -524,7 +589,14 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 	if string(b[0:4]) != segmentIndexMagic {
 		return nil, errIndex
 	}
-	if binary.LittleEndian.Uint32(b[4:8]) != segmentIndexVersion {
+	ver := binary.LittleEndian.Uint32(b[4:8])
+	var spanSize int
+	switch ver {
+	case segmentIndexV1:
+		spanSize = spanRecordV1
+	case segmentIndexVersion:
+		spanSize = spanRecord
+	default:
 		return nil, errIndex
 	}
 	payload := b[segmentIndexHeader:]
@@ -571,7 +643,7 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 	if img.unused < 0 || (img.unused > 0 && !img.incomplete && !img.truncated) {
 		return nil, errIndex
 	}
-	r := ixr{b: payload}
+	r := ixr{b: payload, spanSize: spanSize}
 	props, err := r.props()
 	if err != nil {
 		return nil, err
@@ -630,7 +702,7 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 			if err != nil {
 				return nil, err
 			}
-			ns, err := r.count(spanRecord)
+			ns, err := r.count(r.spanSize)
 			if err != nil {
 				return nil, err
 			}
@@ -686,6 +758,24 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 	if anyLive && !img.incomplete && !img.truncated {
 		return nil, errIndex
 	}
+	img.coalesce()
+	for _, g := range img.groups {
+		for _, ch := range g.channels {
+			got, err := spanTotal(ch.spans)
+			if err != nil || got != ch.total {
+				return nil, errIndex
+			}
+			if ch.daqmx == nil {
+				continue
+			}
+			for i, sps := range ch.daqmx.spans {
+				got, err := spanTotal(sps)
+				if err != nil || got != ch.daqmx.totals[i] {
+					return nil, errIndex
+				}
+			}
+		}
+	}
 	if err := spansInFile(img); err != nil {
 		return nil, err
 	}
@@ -694,28 +784,28 @@ func decodeSegmentIndex(b []byte) (*indexImage, error) {
 
 // spansInFile rejects a sidecar whose spans address bytes outside the file
 // they claim to describe, or whose sample counts cannot fit in that file.
-// decodeSegmentIndex returns errIndex, and Open treats that as a cache miss.
+// Each channel, and each non-primary DAQmx scaler, is capped on its own:
+// overlapping spans that individually fit can still sum past the file, and
+// that sum is what Values would allocate. decodeSegmentIndex returns
+// errIndex, and Open treats that as a cache miss.
 func spansInFile(img *indexImage) error {
 	if img.size < 0 {
 		return errIndex
 	}
 	for _, g := range img.groups {
 		for _, ch := range g.channels {
-			for _, sp := range ch.spans {
-				if err := spanInFile(sp, img.size); err != nil {
-					return err
-				}
+			if err := spanListInFile(ch.spans, img.size); err != nil {
+				return err
 			}
-			if ch.daqmx != nil {
-				for i, sps := range ch.daqmx.spans {
-					if i == ch.daqmx.spec.primary {
-						continue
-					}
-					for _, sp := range sps {
-						if err := spanInFile(sp, img.size); err != nil {
-							return err
-						}
-					}
+			if ch.daqmx == nil || ch.daqmx.spec == nil {
+				continue
+			}
+			for i, sps := range ch.daqmx.spans {
+				if i == ch.daqmx.spec.primary {
+					continue
+				}
+				if err := spanListInFile(sps, img.size); err != nil {
+					return err
 				}
 			}
 		}
@@ -723,28 +813,95 @@ func spansInFile(img *indexImage) error {
 	return nil
 }
 
-func spanInFile(sp span, size int64) error {
-	if sp.dataPos < 0 || sp.dataPos > size {
-		return errIndex
-	}
-	if sp.nChunks > 0 {
-		region, err := mul64(sp.nChunks, sp.chunkSize)
+// spanListInFile applies spanInFile to every span and then caps the list.
+// Fixed-width and digital samples contribute samples*typeSize bytes. Digital
+// lines are bit-packed, so several channels share each raw byte; the cap is
+// per channel, and typeSize is 1, so each line may use up to the whole file.
+// Interleaved channels count only their own type width, which is a subset of
+// the stride already bounded by the chunk extent. Strings are not merged into
+// runs. Each string sample has a 4-byte offset, so the sample count is capped
+// at size/4. The resulting []string header is a constant multiple of that
+// count, so the allocation stays proportional to the file.
+func spanListInFile(spans []span, size int64) error {
+	var samples int64
+	var bytes int64
+	strings := false
+	for i := range spans {
+		if err := spanInFile(spans[i], size); err != nil {
+			return err
+		}
+		n, err := spanSamples(&spans[i])
 		if err != nil {
 			return errIndex
 		}
-		end, err := add64(sp.dataPos, region)
-		if err != nil || end > size {
+		samples, err = add64(samples, n)
+		if err != nil {
 			return errIndex
 		}
-		if sp.chunkSize == 0 && (sp.nPerChunk > 0 || sp.strSize > 0) {
+		if spans[i].str {
+			strings = true
+			continue
+		}
+		if n == 0 {
+			continue
+		}
+		sz := int64(spans[i].typeSize)
+		if sz < 1 {
+			return errIndex
+		}
+		b, err := mul64(n, sz)
+		if err != nil {
+			return errIndex
+		}
+		bytes, err = add64(bytes, b)
+		if err != nil || bytes > size {
 			return errIndex
 		}
 	}
-	samples, err := spanTotal([]span{sp})
+	if strings && samples > size/4 {
+		return errIndex
+	}
+	return nil
+}
+
+func spanInFile(sp span, size int64) error {
+	reps := int64(1)
+	if sp.runCount > 1 {
+		reps = sp.runCount
+	}
+	if sp.runCount < 0 || (sp.runCount <= 1 && sp.runStep != 0) {
+		return errIndex
+	}
+	if reps > 1 && (sp.runStep <= 0 || sp.partialN != 0 || sp.str || sp.live) {
+		return errIndex
+	}
+	if err := spanExtent(sp, sp.dataPos, size); err != nil {
+		return err
+	}
+	if reps > 1 {
+		// Last repeat: start + step*(count-1), then the same chunk extent.
+		// step > 0 and extent >= 0, so a last end inside the file puts every
+		// earlier repeat inside it too. The product is overflow-checked.
+		delta, err := mul64(reps-1, sp.runStep)
+		if err != nil {
+			return errIndex
+		}
+		last, err := add64(sp.dataPos, delta)
+		if err != nil {
+			return errIndex
+		}
+		if err := spanExtent(sp, last, size); err != nil {
+			return err
+		}
+	}
+	samples, err := spanSamples(&sp)
 	if err != nil || samples < 0 {
 		return errIndex
 	}
 	if sp.str {
+		if reps > 1 {
+			return errIndex
+		}
 		if sp.nPerChunk > 0 {
 			table, err := mul64(sp.nPerChunk, 4)
 			if err != nil || sp.strSize < table {
@@ -766,8 +923,8 @@ func spanInFile(sp span, size int64) error {
 		if sp.typeSize <= 0 || sp.typeSize > 16 {
 			return errIndex
 		}
-		bytes, err := mul64(samples, int64(sp.typeSize))
-		if err != nil || bytes > size {
+		b, err := mul64(samples, int64(sp.typeSize))
+		if err != nil || b > size {
 			return errIndex
 		}
 		if sp.nPerChunk > 1 && sp.stride <= 0 {
@@ -780,14 +937,33 @@ func spanInFile(sp span, size int64) error {
 	return nil
 }
 
+// spanExtent reports whether the chunk region that starts at dataPos lies
+// inside a file of the given size. Partial-tail positions are checked once
+// by spanInFile; a run has no partial tail.
+func spanExtent(sp span, dataPos, size int64) error {
+	if dataPos < 0 || dataPos > size {
+		return errIndex
+	}
+	if sp.nChunks > 0 {
+		region, err := mul64(sp.nChunks, sp.chunkSize)
+		if err != nil {
+			return errIndex
+		}
+		end, err := add64(dataPos, region)
+		if err != nil || end > size {
+			return errIndex
+		}
+		if sp.chunkSize == 0 && (sp.nPerChunk > 0 || sp.strSize > 0) {
+			return errIndex
+		}
+	}
+	return nil
+}
+
 func spanTotal(spans []span) (int64, error) {
 	var n int64
-	for _, sp := range spans {
-		full, err := mul64(sp.nChunks, sp.nPerChunk)
-		if err != nil {
-			return 0, err
-		}
-		part, err := add64(full, sp.partialN)
+	for i := range spans {
+		part, err := spanSamples(&spans[i])
 		if err != nil {
 			return 0, err
 		}
@@ -801,7 +977,10 @@ func spanTotal(spans []span) (int64, error) {
 
 var errIndex = fmt.Errorf("segment index")
 
-type ixw struct{ b []byte }
+type ixw struct {
+	b  []byte
+	v2 bool
+}
 
 func (w *ixw) u8(v byte) { w.b = append(w.b, v) }
 
@@ -875,11 +1054,26 @@ func (w *ixw) span(sp span) {
 	w.i64(sp.partialPos)
 	w.i64(sp.partialCol)
 	w.i64(sp.partialStride)
+	if !w.v2 {
+		return
+	}
+	rc := sp.runCount
+	step := sp.runStep
+	if rc < 1 {
+		rc = 1
+		step = 0
+	}
+	if rc == 1 {
+		step = 0
+	}
+	w.i64(step)
+	w.i64(rc)
 }
 
 type ixr struct {
-	b   []byte
-	off int
+	b        []byte
+	off      int
+	spanSize int
 }
 
 func (r *ixr) remain() int { return len(r.b) - r.off }
@@ -1027,6 +1221,25 @@ func (r *ixr) span() (span, error) {
 	}
 	if sp.partialStride, err = r.i64(); err != nil {
 		return span{}, err
+	}
+	if r.spanSize >= spanRecord {
+		if sp.runStep, err = r.i64(); err != nil {
+			return span{}, err
+		}
+		if sp.runCount, err = r.i64(); err != nil {
+			return span{}, err
+		}
+	} else {
+		sp.runCount = 1
+	}
+	if sp.runCount == 0 && sp.runStep == 0 {
+		sp.runCount = 1
+	}
+	if sp.runCount < 1 || (sp.runCount == 1 && sp.runStep != 0) {
+		return span{}, errIndex
+	}
+	if sp.runCount > 1 && (sp.runStep <= 0 || sp.partialN != 0 || sp.str || sp.live) {
+		return span{}, errIndex
 	}
 	if uint64(sz) > uint64(^uint(0)>>1) {
 		return span{}, errIndex

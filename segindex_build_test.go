@@ -186,7 +186,7 @@ func TestSegmentIndexTrustIdentityMissesSizeMtimeIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		origDev, origIno := fileIdentity(fi)
+		origDev, origIno := openFileID(t, path)
 		replaced := path + ".replaced"
 		if err := os.WriteFile(replaced, raw, 0644); err != nil {
 			t.Fatal(err)
@@ -204,7 +204,7 @@ func TestSegmentIndexTrustIdentityMissesSizeMtimeIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		dev, ino := fileIdentity(fi2)
+		dev, ino := openFileID(t, path)
 		before := segmentParses.Load()
 		f, err := openTrust(path)
 		if err != nil {
@@ -215,8 +215,10 @@ func TestSegmentIndexTrustIdentityMissesSizeMtimeIdentity(t *testing.T) {
 			if origDev != 0 || origIno != 0 {
 				t.Fatal("replaced file kept device and inode")
 			}
-			// fileIdentity is 0,0 where the platform has no device or inode
-			// (Windows). A same-size, same-mtime replace stays a trust hit.
+			// fileID is 0,0 only where the platform has no device or inode.
+			// Windows fills both from GetFileInformationByHandle, so a
+			// replaced file there takes the miss path below. A same-size,
+			// same-mtime replace stays a trust hit only when both are 0.
 			same := fi2.Size() == fi.Size() && fi2.ModTime().UnixNano() == fi.ModTime().UnixNano()
 			if same {
 				if !f.SegmentIndexUsed() || segmentParses.Load() != before {
@@ -236,6 +238,20 @@ func TestSegmentIndexTrustIdentityMissesSizeMtimeIdentity(t *testing.T) {
 			t.Fatal("replaced file was trusted")
 		}
 	})
+}
+
+func openFileID(t *testing.T, path string) (dev, ino uint64) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	dev, ino, err = fileID(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dev, ino
 }
 
 func TestSegmentIndexDefaultCatchesMetadataSameSizeMtime(t *testing.T) {

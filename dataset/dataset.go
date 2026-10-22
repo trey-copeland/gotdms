@@ -342,12 +342,13 @@ func WithSegmentIndex(enabled bool) Option {
 // option still recomputes the fingerprint.
 //
 // An edit that preserves size and modification time, and that does not
-// replace the file's inode, is missed. On Windows, and on any other platform
-// that reports no device and inode, this option checks only size and
-// modification time. FAT modification times step by 2 seconds, and exFAT by
-// 10 milliseconds, so two writes in one step share a timestamp. Bounds
-// checks on spans remain, so a bad span is a cache miss rather than an
-// out-of-bounds read. See tdms.WithSegmentIndexTrustIdentity.
+// replace the file's inode, is missed. On Windows the device and inode are
+// the volume serial number and file index, so a replaced file is a miss.
+// On a platform that still reports no device and inode, this option checks
+// only size and modification time. FAT modification times step by 2 seconds,
+// and exFAT by 10 milliseconds, so two writes in one step share a timestamp.
+// Bounds checks on spans remain, so a bad span is a cache miss rather than
+// an out-of-bounds read. See tdms.WithSegmentIndexTrustIdentity.
 func WithSegmentIndexTrustIdentity() Option {
 	return func(o *options) {
 		o.segIndex = true

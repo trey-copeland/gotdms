@@ -67,8 +67,9 @@ func WithLenientTail() ReaderOption {
 // that pairing is ignored so the TDMS file is not overwritten. The conventional
 // path is SegmentIndexPath.
 //
-// The on-disk layout is little-endian, version 1, magic "GTDX". It is not an
-// NI *.tdms_index (TDSh) file. See SegmentIndexPath for the field list.
+// The on-disk layout is little-endian, version 2, magic "GTDX". Version 1
+// sidecars still open. It is not an NI *.tdms_index (TDSh) file. See
+// SegmentIndexPath for the field list.
 //
 // WithSegmentIndexTrustIdentity skips the fingerprint walk on a later open.
 // The default, with that option unset, still recomputes the fingerprint.
@@ -92,12 +93,15 @@ func WithSegmentIndex(sidecar string) ReaderOption {
 // replacing the file is a miss even when size and modification time were
 // copied onto the new file.
 //
-// On Windows, and on any other platform that reports no device and inode,
-// trust mode checks only size and modification time. Both identity fields
-// are stored as 0. FAT records modification time in steps of 2 seconds, and
-// exFAT in steps of 10 milliseconds, so two writes inside one step share a
-// timestamp. An edit that lands in the same step is missed, just as an edit
-// whose timestamp was restored is missed.
+// On Windows the device and inode are the volume serial number and file
+// index from GetFileInformationByHandle, so a replaced file is a miss even
+// when size and modification time were copied onto it. On a platform that
+// still reports no device and inode, trust mode checks only size and
+// modification time, and both identity fields are stored as 0. FAT records
+// modification time in steps of 2 seconds, and exFAT in steps of 10
+// milliseconds, so two writes inside one step share a timestamp. An edit
+// that lands in the same step is missed, just as an edit whose timestamp
+// was restored is missed.
 //
 // Decode bounds checks stay in force. A span that addresses bytes outside
 // the file, or that claims more samples than the file can hold, is a decode

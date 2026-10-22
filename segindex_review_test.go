@@ -166,15 +166,20 @@ func TestSegmentIndexWriteRejectsChangeDuringParse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rf.Close()
-	pre, err := rf.Stat()
+	preFI, err := rf.Stat()
 	if err != nil {
 		t.Fatal(err)
 	}
+	dev, ino, err := fileID(rf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre := dataStat{fi: preFI, dev: dev, ino: ino}
 	f, err := NewReader(rf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	later := pre.ModTime().Add(time.Hour)
+	later := pre.fi.ModTime().Add(time.Hour)
 	if err := os.Chtimes(path, later, later); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +246,23 @@ func FuzzSegmentIndexTrusted(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	dev, ino := fileIdentity(fi)
+	rf, err := os.Open(path)
+	if err != nil {
+		f.Fatal(err)
+	}
+	dev, ino, err := fileID(rf)
+	rf.Close()
+	if err != nil {
+		f.Fatal(err)
+	}
+	if len(blob) >= segmentIndexHeader+spanRecord+8 {
+		huge := append([]byte(nil), blob[segmentIndexHeader:]...)
+		// run count is the last int64 of the single span, just before the
+		// channel total. A huge count must not become a trust hit.
+		at := len(huge) - 8 - 8
+		binary.LittleEndian.PutUint64(huge[at:], uint64(1)<<62)
+		f.Add(huge, uint32(0))
+	}
 	f.Fuzz(func(t *testing.T, payload []byte, flags uint32) {
 		if len(payload) > 1<<16 {
 			payload = payload[:1<<16]
@@ -264,11 +285,24 @@ func FuzzSegmentIndexTrusted(f *testing.F) {
 			t.Fatalf("sidecar must not fail the open: %v", err)
 		}
 		defer got.Close()
+		if got.SegmentIndexUsed() {
+			for _, g := range got.Groups() {
+				for _, c := range g.Channels() {
+					limit := fi.Size()
+					if c.DataType() == TypeString {
+						limit = fi.Size() / 4
+					}
+					if int64(c.Len()) > limit {
+						t.Fatalf("trust hit %s len %d exceeds file bound %d", c.Path(), c.Len(), limit)
+					}
+				}
+			}
+		}
 		for _, g := range got.Groups() {
 			for _, c := range g.Channels() {
 				_, _ = c.Values()
 				_, _ = c.Float64s()
-				if c.Len() > 0 {
+				if c.Len() > 0 && c.Len() < 1<<20 {
 					_, _ = c.Slice(c.Len()-1, c.Len())
 				}
 			}

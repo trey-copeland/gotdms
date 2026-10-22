@@ -11,19 +11,27 @@ import (
 // Fragmented files are generated once per process. Each segment after the
 // first is a raw-only lead-in plus four float64 samples, which is the shape
 // that makes a lead-in walk expensive: many small segments, little metadata.
+// every > 0 writes two samples on each segment whose index is a multiple of
+// every, so the run splitter cannot collapse the whole file.
 var fragmentedFiles struct {
 	sync.Mutex
-	paths map[int]string
+	paths map[fragKey]string
 }
 
-func fragmentedTDMS(b *testing.B, segs int) string {
+type fragKey struct {
+	segs  int
+	every int
+}
+
+func fragmentedTDMS(b *testing.B, segs, every int) string {
 	b.Helper()
 	fragmentedFiles.Lock()
 	defer fragmentedFiles.Unlock()
 	if fragmentedFiles.paths == nil {
-		fragmentedFiles.paths = map[int]string{}
+		fragmentedFiles.paths = map[fragKey]string{}
 	}
-	if p, ok := fragmentedFiles.paths[segs]; ok {
+	key := fragKey{segs, every}
+	if p, ok := fragmentedFiles.paths[key]; ok {
 		return p
 	}
 	dir, err := os.MkdirTemp("", "gtdx-frag-")
@@ -46,9 +54,14 @@ func fragmentedTDMS(b *testing.B, segs int) string {
 		chs[i] = ch
 	}
 	one := []float64{1}
+	two := []float64{1, 2}
 	for i := 0; i < segs; i++ {
+		buf := one
+		if every > 0 && i%every == 0 {
+			buf = two
+		}
 		for _, ch := range chs {
-			if err := ch.Write(one); err != nil {
+			if err := ch.Write(buf); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -62,15 +75,26 @@ func fragmentedTDMS(b *testing.B, segs int) string {
 	if err := BuildSegmentIndex(path); err != nil {
 		b.Fatal(err)
 	}
-	fragmentedFiles.paths[segs] = path
+	fragmentedFiles.paths[key] = path
 	return path
 }
 
 func BenchmarkSegmentIndexOpen(b *testing.B) {
-	for _, segs := range []int{10_000, 100_000} {
-		path := fragmentedTDMS(b, segs)
+	cases := []struct {
+		segs  int
+		every int
+		name  string
+	}{
+		{10_000, 0, "uniform"},
+		{10_000, 1000, "mixed"},
+		{100_000, 0, "uniform"},
+		{100_000, 1000, "mixed"},
+	}
+	for _, c := range cases {
+		path := fragmentedTDMS(b, c.segs, c.every)
 		side := SegmentIndexPath(path)
-		b.Run(fmt.Sprintf("%d/none", segs), func(b *testing.B) {
+		segs := c.segs
+		b.Run(fmt.Sprintf("%d/%s/none", segs, c.name), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				f, err := Open(path)
@@ -83,7 +107,7 @@ func BenchmarkSegmentIndexOpen(b *testing.B) {
 				f.Close()
 			}
 		})
-		b.Run(fmt.Sprintf("%d/sidecar", segs), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d/%s/sidecar", segs, c.name), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				f, err := Open(path, WithSegmentIndex(side))
@@ -96,7 +120,7 @@ func BenchmarkSegmentIndexOpen(b *testing.B) {
 				f.Close()
 			}
 		})
-		b.Run(fmt.Sprintf("%d/trust", segs), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d/%s/trust", segs, c.name), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				f, err := Open(path, WithSegmentIndex(side), WithSegmentIndexTrustIdentity())
