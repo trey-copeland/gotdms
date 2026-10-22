@@ -555,6 +555,16 @@ func TestDAQmxMultiSegment(t *testing.T) {
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("analog to digital: %v", err)
 	}
+	// A digital scaler's decoded values are uint8 either way. The DAQmx type
+	// code still has to match, which is what npTDMS compares.
+	digFirst := buildDAQmx(daqTOC, []dmObj{
+		chDAQmx("/'g'/'d'", 1, RawIndexDAQmxDigitalObserved, []uint32{1}, []dmScaler{{typ: 0, off: 0}}),
+	}, []byte{0x04})
+	digWider := chDAQmx("/'g'/'d'", 1, RawIndexDAQmxDigitalObserved, []uint32{4}, []dmScaler{{typ: 4, off: 0}})
+	_, err = NewReader(bytes.NewReader(append(digFirst, buildDAQmx(daqTOC, []dmObj{digWider}, le32(1))...)))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("digital type code change: %v", err)
+	}
 	std := buildDAQmx(TocMetaData|TocNewObjList|TocRawData, []dmObj{objStd("/'g'/'c'", TypeInt16, 1)}, i16Raw(9))
 	_, err = NewReader(bytes.NewReader(append(first, std...)))
 	if !errors.Is(err, ErrCorrupt) {

@@ -115,17 +115,25 @@ type DAQmxScale struct {
 //
 // Status is NI_Scaling_Status ("unscaled", "scaled", or empty). Source is
 // "channel", "group", or "file", the object whose properties supplied the
-// scales. Channel properties win, then the group, then the file. Count is
-// NI_Number_Of_Scales, or 0 when that property is absent.
+// scales. Channel properties win, then the group, then the file.
+//
+// HasCount is true when NI_Number_Of_Scales is present. Count is that value,
+// including 0. When the property is absent, HasCount is false and Count is 0.
+// A count of 0 applies no scale. When the property is absent, the output is
+// the highest typed index.
 //
 // Scales holds only the indexes that have an NI_Scale[i]_Scale_Type. An index
 // below Count with no type is the DAQmx scaler whose ScaleID is that index:
 // its raw samples are that scale's output.
 type DAQmxScaling struct {
-	Status string
-	Source string
-	Count  int
-	Scales []DAQmxScale
+	Status   string
+	Source   string
+	Count    int
+	HasCount bool
+	Scales   []DAQmxScale
+
+	// badCount is set when NI_Number_Of_Scales does not fit in an int.
+	badCount bool
 }
 
 // DAQmx reports the raw-data index when this channel's samples are DAQmx raw
@@ -194,15 +202,23 @@ func (c *Channel) DAQmxScaling() DAQmxScaling {
 	if source == "" {
 		return DAQmxScaling{}
 	}
-	count := 0
-	if n, ok := propUint(props, "NI_Number_Of_Scales"); ok && n <= math.MaxInt32 {
-		count = int(n)
+	var count int
+	var hasCount, badCount bool
+	if n, ok := propUint(props, "NI_Number_Of_Scales"); ok {
+		if n > uint64(math.MaxInt) {
+			badCount = true
+		} else {
+			count = int(n)
+			hasCount = true
+		}
 	}
 	return DAQmxScaling{
-		Status: scalingStatus(props),
-		Source: source,
-		Count:  count,
-		Scales: parseDAQmxScales(props),
+		Status:   scalingStatus(props),
+		Source:   source,
+		Count:    count,
+		HasCount: hasCount,
+		Scales:   parseDAQmxScales(props),
+		badCount: badCount,
 	}
 }
 
@@ -210,19 +226,26 @@ func (c *Channel) DAQmxScaling() DAQmxScaling {
 // is what npTDMS returns for a scaled DAQmx channel.
 //
 // The output is the last scale: index Count-1 when NI_Number_Of_Scales is
-// present, otherwise the highest NI_Scale index with a type. A Linear or
+// present and positive. A count of 0 applies nothing. When that property is
+// absent, the output is the highest NI_Scale index with a type. A Linear or
 // Polynomial scale is applied to its input source, which is computed the same
 // way. An input of 0xFFFFFFFF, or a missing input property, is the primary
 // scaler's raw samples. An index with no scale type is the DAQmx scaler with
-// that ScaleID; a channel with one scaler uses that scaler. Status "scaled"
-// means the samples are already in engineering units, so the raw float64
-// values are returned. No scales is the same: the raw values. A chain that
-// needs another scale type, or a DAQmx scaler the channel does not have,
-// returns ErrUnsupported and does not change what Values returns.
+// that ScaleID. Status "scaled" means the samples are already in engineering
+// units, so the raw float64 values are returned. No scales is the same: the
+// raw values. A chain that needs another scale type, or a DAQmx scaler the
+// channel does not have, returns ErrUnsupported and does not change what
+// Values returns.
 func (c *Channel) DAQmxScaledFloat64s() ([]float64, error) {
 	sc := c.DAQmxScaling()
+	if sc.badCount {
+		return nil, wrap("read", c.path, fmt.Errorf("%w: NI_Number_Of_Scales does not fit", ErrUnsupported))
+	}
+	if strings.EqualFold(sc.Status, "scaled") || (sc.HasCount && sc.Count == 0) {
+		return c.Float64s()
+	}
 	final := -1
-	if sc.Count > 0 {
+	if sc.HasCount {
 		final = sc.Count - 1
 	} else {
 		for _, s := range sc.Scales {
@@ -231,7 +254,7 @@ func (c *Channel) DAQmxScaledFloat64s() ([]float64, error) {
 			}
 		}
 	}
-	if strings.EqualFold(sc.Status, "scaled") || final < 0 {
+	if final < 0 {
 		return c.Float64s()
 	}
 	out, err := evalDAQmxScales(sc.Scales, final, c.daqmxScaleInput)
@@ -269,11 +292,6 @@ func (c *Channel) daqmxScaleInput(id uint32, named bool) ([]float64, error) {
 			return nil, err
 		}
 		return toFloat64s(v)
-	}
-	if len(scalers) == 1 {
-		// The NI article's linear example reads input 0 with no NI_Scale[0]
-		// on a channel whose one scaler may use another id.
-		return c.Float64s()
 	}
 	return nil, fmt.Errorf("%w: DAQmx scale input %d names no scaler on this channel", ErrUnsupported, id)
 }
@@ -730,7 +748,9 @@ func sameDAQmxScalers(a, b *daqmxSpec) bool {
 	}
 	for i := range a.scalers {
 		x, y := a.scalers[i], b.scalers[i]
-		if x.dt != y.dt || x.scaleID != y.scaleID || x.digital != y.digital {
+		// rawType is the DAQmx type code. A digital scaler's decoded dt is
+		// always uint8, so the code is what distinguishes uint8 from uint32.
+		if x.dt != y.dt || x.rawType != y.rawType || x.scaleID != y.scaleID || x.digital != y.digital {
 			return false
 		}
 	}

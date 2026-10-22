@@ -249,8 +249,29 @@ func TestDAQmxScaleChainsMatchNpTDMS(t *testing.T) {
 	if _, err := c.DAQmxScaledFloat64s(); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("unknown scaler: %v", err)
 	}
-	if got := c.DAQmxScaling(); got.Count != 3 || len(got.Scales) != 1 {
+	if got := c.DAQmxScaling(); !got.HasCount || got.Count != 3 || len(got.Scales) != 1 {
 		t.Fatalf("%+v", got)
+	}
+	// One scaler is not a stand-in for a different scale id. npTDMS raises
+	// KeyError for this file; channel[:] is not the other scaler scaled.
+	obj = chDAQmx("/'g'/'c'", 3, 0, []uint32{2}, []dmScaler{{id: 5, typ: 3}}, cat(nscales(2), linearProps(1, 2, 0, u32ptr(0)))...)
+	c = daqCh(t, openBytes(t, buildDAQmx(daqTOC, []dmObj{obj}, oneRaw)), "g", "c")
+	if _, err := c.DAQmxScaledFloat64s(); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("scaler id 5, input 0: %v", err)
+	}
+	// NI_Number_Of_Scales 0 means there is no scale, even if a formula is present.
+	obj = chDAQmx("/'g'/'c'", 3, 0, []uint32{2}, one, cat(
+		[]dmProp{{name: "NI_Number_Of_Scales", kind: propU32, u32: 0}, {name: "NI_Scaling_Status", kind: propStr, str: "unscaled"}},
+		linearProps(0, 2, 0, nil),
+	)...)
+	c = daqCh(t, openBytes(t, buildDAQmx(daqTOC, []dmObj{obj}, oneRaw)), "g", "c")
+	got, err := c.DAQmxScaledFloat64s()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, got, []float64{1, 2, 3})
+	if meta := c.DAQmxScaling(); !meta.HasCount || meta.Count != 0 {
+		t.Fatalf("%+v", meta)
 	}
 	// Duplicate scale ids cannot be resolved.
 	dup := []dmScaler{{id: 0, typ: 3, off: 0}, {id: 1, typ: 3, off: 2}, {id: 1, typ: 3, off: 2}}
@@ -281,8 +302,8 @@ func TestDAQmxSidecarRejectsBadScalerType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The DAQmx block for /'g'/'a' starts with the header word, then one
-	// width, then one scaler whose first field is the data type.
+	// The DAQmx block for /'g'/'a' starts with the header word, a width
+	// count, two widths, a scaler count, then the scaler's data type.
 	var hdr [4]byte
 	putLE32(hdr[:], RawIndexDAQmxFormatChanging)
 	at := bytes.Index(payload, hdr[:])
