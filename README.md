@@ -345,7 +345,7 @@ An open uses the sidecar only when every one of those checks matches the file it
 | 100,000 | sidecar | 62.129 ms | 86,434,256 | 100,048 |
 | 100,000 | trust identity | 31.932 ms | 83,234,050 | 46 |
 
-On the 100,000-segment file the default sidecar hit is about 1.81× the no-sidecar open, and the trust-identity hit is about 3.51× that open and about 1.95× the default hit. Trust identity drops the lead-in walk (100,048 allocs/op down to 46). Most of the remaining time and bytes are decoding the 37 MiB sidecar into spans. A file whose metadata is small relative to its segment count benefits more; a sidecar that is itself tens of megabytes still has to be read.
+On the 100,000-segment file the no-sidecar open takes 1.81× as long as a default sidecar hit, and 3.51× as long as a trust-identity hit. The default hit takes 1.95× as long as the trust-identity hit. Trust identity drops the lead-in walk (100,048 allocs/op down to 46). Most of the remaining time and bytes are decoding the 37 MiB sidecar into spans. A file whose metadata is small relative to its segment count benefits more; a sidecar that is itself tens of megabytes still has to be read.
 
 ```
 go test -run '^$' -bench 'BenchmarkSegmentIndexOpen' -benchmem -count=10
