@@ -348,7 +348,9 @@ def daqmx_layout_oracle():
     typed: the DAQmx index data type is the scaler's type (tdsTypeI16) rather
     than 0xFFFFFFFF. stdflag: standard indexes in a segment that sets
     kTocDAQmxRawData. widen: a second segment adds a channel to the buffer,
-    so the first channel's stride and the width vector change.
+    so the first channel's stride and the width vector change. padded: the
+    raw-data offset points past the end of the object list (zero and 0xFF
+    filler), as in NI DAQ captures; npTDMS seeks to the offset.
     """
     i16 = daqmx_scaler_metadata(0, 3, 0)
     typed = segment_objects_metadata(
@@ -380,8 +382,15 @@ def daqmx_layout_oracle():
                 (segment_toc(), wider, "03 00 1E 00 04 00 28 00"),
             ],
         )
+        write_generated(
+            os.path.join(tmp, "padded.tdms"),
+            [
+                (segment_toc(), first + " 00" * 2621, "01 00 02 00"),
+                (segment_toc(), wider + " FF" * 3607, "03 00 1E 00 04 00 28 00"),
+            ],
+        )
         got = go_read(tmp)
-        for name in ("typed.tdms", "stdflag.tdms", "widen.tdms"):
+        for name in ("typed.tdms", "stdflag.tdms", "widen.tdms", "padded.tdms"):
             compare_raw(got[name], np_raw_doc(os.path.join(tmp, name)), f"daqmx layout {name}")
 
 

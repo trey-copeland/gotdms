@@ -902,9 +902,12 @@ func (f *File) readMeta(meta []byte, order []string, haveOrder, newList, hasRaw,
 			}
 		}
 	}
-	if d.remain() != 0 {
-		return nil, wrapf("read", f.path, ErrCorrupt, "%d unused metadata bytes", d.remain())
-	}
+	// Bytes after the last declared object are not an error. The raw-data
+	// offset in the lead-in, not the end of the object list, is where raw
+	// data starts (NI's format article; npTDMS and other readers seek there
+	// and never look at the gap). Captures from NI DAQ hardware carry a gap
+	// of a few KiB here, which npTDMS reads cleanly. The gap is skipped
+	// unread, whatever it holds.
 	compact := next[:0]
 	for _, p := range next {
 		if !removed[p] {

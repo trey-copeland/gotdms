@@ -6,6 +6,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ### Fixed
 
+- A segment whose raw-data offset points past the end of its object list opens. The bytes between the last object and the offset are skipped, which is what npTDMS does and what the lead-in's raw-data offset defines. Before, the open failed with `N unused metadata bytes: corrupt TDMS structure`. NI DAQ high-speed captures (2621 and about 3607 bytes past the object list) hit this with DAQmx raw data. The skip starts only after the declared object count has been read in full: an object list that ends inside its metadata, or a raw-data offset past EOF, still fails the open. The sidecar fingerprint already covers those skipped bytes.
 - `.github/workflows/test-and-publish-go-release.yml` checks out with `fetch-depth: 0` and `fetch-tags: true`, matching the module workflow, so a tag run can read `v0.1.0`. `TestSegmentIndexV010MissesVersion2` skips when the package directory is not inside a git work tree (`git rev-parse --is-inside-work-tree`). A module-cache `go test`, including `go test all`, no longer fails for the missing `.git`. When `CI` is set, a missing work tree or tag is still a failure and the message names that checkout.
 
 ## v0.1.1 (2026-10-22)
