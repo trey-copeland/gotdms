@@ -262,10 +262,11 @@ const (
 // Dataset is an indexed set of TDMS files. It is safe for concurrent reads
 // after Open returns. Open closes every file it scans.
 type Dataset struct {
-	files []string
-	occ   []Occurrence
-	basis time.Time
-	opt   options
+	files  []string
+	occ    []Occurrence
+	basis  time.Time
+	opt    options
+	status map[string]tdms.FileStatus
 }
 
 type options struct {
@@ -281,6 +282,7 @@ type options struct {
 	ts          map[string]string
 	segIndex    bool
 	segTrust    bool
+	lenient     bool
 }
 
 type clockMode int
@@ -400,6 +402,21 @@ func WithSegmentIndexTrustIdentity() Option {
 	}
 }
 
+// WithLenientTail opens every file with tdms.WithLenientTail, for indexing
+// and for later reads. A file whose final segment runs past EOF, or that
+// ends in a torn tail (bytes after the last whole segment that do not parse,
+// as a power loss leaves them), contributes its whole segments instead of
+// failing OpenFiles. FileStatus reports which files were recovered and how
+// many bytes were dropped. The default is off: such a file fails the open.
+//
+// A read reopens the file, so a file that is still being written can show
+// more segments at read time than it did when the dataset was indexed.
+func WithLenientTail() Option {
+	return func(o *options) {
+		o.lenient = true
+	}
+}
+
 // WithTimestampChannel declares the timestamp channel for one group. It
 // overrides WithTimestampChannelName for that group. A later call for the same
 // group replaces the earlier one. group must be non-empty. An empty name opts
@@ -474,9 +491,10 @@ func OpenFiles(paths []string, opts ...Option) (*Dataset, error) {
 		return nil, fmt.Errorf("%w", ErrNoFiles)
 	}
 	parts := make([][]Occurrence, len(abs))
+	stats := make([]tdms.FileStatus, len(abs))
 	errs := make([]error, len(abs))
 	run(opt.workers, len(abs), func(i int) {
-		parts[i], errs[i] = indexFile(abs[i], opt)
+		parts[i], stats[i], errs[i] = indexFile(abs[i], opt)
 	})
 	for i, err := range errs {
 		if err != nil {
@@ -496,7 +514,11 @@ func OpenFiles(paths []string, opts ...Option) (*Dataset, error) {
 		}
 		return occ[i].Name < occ[j].Name
 	})
-	ds := &Dataset{files: abs, occ: occ, opt: opt}
+	status := make(map[string]tdms.FileStatus, len(abs))
+	for i, path := range abs {
+		status[path] = stats[i]
+	}
+	ds := &Dataset{files: abs, occ: occ, opt: opt, status: status}
 	ds.basis = opt.basis
 	if !opt.basisSet {
 		ds.basis = earliest(occ)
@@ -870,23 +892,37 @@ func run(workers, n int, fn func(i int)) {
 	wg.Wait()
 }
 
-func openTDMS(path string, segIndex, segTrust bool) (*tdms.File, error) {
-	if !segIndex {
-		return tdms.Open(path)
+func openTDMS(path string, opt options) (*tdms.File, error) {
+	var opts []tdms.ReaderOption
+	if opt.lenient {
+		opts = append(opts, tdms.WithLenientTail())
 	}
-	opts := []tdms.ReaderOption{tdms.WithSegmentIndex(tdms.SegmentIndexPath(path))}
-	if segTrust {
-		opts = append(opts, tdms.WithSegmentIndexTrustIdentity())
+	if opt.segIndex {
+		opts = append(opts, tdms.WithSegmentIndex(tdms.SegmentIndexPath(path)))
+		if opt.segTrust {
+			opts = append(opts, tdms.WithSegmentIndexTrustIdentity())
+		}
 	}
 	return tdms.Open(path, opts...)
 }
 
-func indexFile(path string, opt options) ([]Occurrence, error) {
-	f, err := openTDMS(path, opt.segIndex, opt.segTrust)
+// FileStatus returns how the indexed file at path ended when OpenFiles read
+// it: complete, incomplete (the NI incomplete-segment sentinel), or, with
+// WithLenientTail, truncated, including a dropped torn tail
+// (tdms.FileStatus.DroppedTail). path is one of Files. The second result is
+// false for any other path.
+func (d *Dataset) FileStatus(path string) (tdms.FileStatus, bool) {
+	st, ok := d.status[path]
+	return st, ok
+}
+
+func indexFile(path string, opt options) ([]Occurrence, tdms.FileStatus, error) {
+	f, err := openTDMS(path, opt)
 	if err != nil {
-		return nil, err
+		return nil, tdms.FileStatus{}, err
 	}
 	defer f.Close()
+	st := f.Status()
 	var out []Occurrence
 	for _, g := range f.Groups() {
 		name, mode := opt.declared(g.Name())
@@ -909,7 +945,7 @@ func indexFile(path string, opt options) ([]Occurrence, error) {
 				// when many channels share a long axis.
 				tsStart, tsLast, tsDt, tsHasDt, tsUsable, err = spanDeclared(tsCh, opt)
 				if err != nil {
-					return nil, err
+					return nil, tdms.FileStatus{}, err
 				}
 			}
 		}
@@ -940,13 +976,13 @@ func indexFile(path string, opt options) ([]Occurrence, error) {
 				}
 			case clockOptOut, clockNone:
 				if err := applyWaveform(&o, ch); err != nil {
-					return nil, err
+					return nil, tdms.FileStatus{}, err
 				}
 			}
 			out = append(out, o)
 		}
 	}
-	return out, nil
+	return out, st, nil
 }
 
 // spanDeclaredCalls counts catalog clock inspections. A shared clock is one

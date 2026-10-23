@@ -28,11 +28,16 @@ const DefaultTailInterval = 100 * time.Millisecond
 // WithLenientTail. Samples that belong to that partial segment are not
 // committed, so Next does not deliver them; earlier finished segments are.
 // When a later poll sees the declared length, those samples become
-// committed. A file that does not exist yet, or a read that still returns
+// committed. A torn tail after the last whole segment whose error is
 // ErrTruncated (a short trailing lead-in, or metadata that itself runs past
-// EOF), is "the writer has not finished" and is polled again. Any other
-// open or read error stops the tail. Cancel the context to stop. Close
-// cancels the wait without setting Err.
+// EOF) is "the writer has not finished": the whole segments before it are
+// delivered and the file is polled again. A file that does not exist yet,
+// or that has no whole segment yet and returns ErrTruncated, is polled
+// again too. Follow cannot tell a running writer from one that stopped, so
+// such a file that never grows is polled until the context is cancelled.
+// A torn tail of any other kind (a bad tag, zeros, garbage) and any other
+// open or read error stop the tail. See WithLenientTail. Cancel the context
+// to stop. Close cancels the wait without setting Err.
 //
 // The channel is chosen by its group and channel names. Nothing is inferred
 // from the name: a channel named Time is tailed as whatever DataType it has.
@@ -181,6 +186,11 @@ func (t *Tail) pull() (any, bool, error) {
 		return nil, false, err
 	}
 	defer f.Close()
+	if st := f.Status(); st.TailError != nil && !errors.Is(st.TailError, ErrTruncated) {
+		// Zeros or garbage after the last whole segment. A writer that is
+		// still running appends whole lead-ins, so this is not "wait".
+		return nil, false, st.TailError
+	}
 	g, ok := f.Group(t.group)
 	if !ok {
 		return nil, false, nil

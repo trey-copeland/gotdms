@@ -290,6 +290,12 @@ func (f *File) writeSegmentIndex(sidecar string, pre dataStat) error {
 	if pre.fi == nil {
 		return fmt.Errorf("segment index: no stat of the data file before parse")
 	}
+	if f.droppedTail > 0 {
+		// The sidecar would describe a prefix of the file. A torn tail is a
+		// repair to make (truncate the file), not a state to cache.
+		return fmt.Errorf("%w: segment index: %d torn bytes after the last whole segment; truncate the file to %d bytes first",
+			ErrTruncated, f.droppedTail, f.size)
+	}
 	now, err := f.statData()
 	if err != nil {
 		return err

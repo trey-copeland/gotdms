@@ -2,6 +2,7 @@ package tdms
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -34,7 +35,12 @@ type File struct {
 	incomplete  bool
 	partialTail bool
 	unusedTail  int64
-	truncated   bool // final next-segment offset ran past EOF; WithLenientTail
+	truncated   bool // WithLenientTail: final segment past EOF, or a dropped torn tail
+	// droppedTail is the number of bytes after the last whole segment that
+	// WithLenientTail dropped because they do not parse (a torn tail).
+	// tailErr is the error a strict Open returns for those bytes.
+	droppedTail int64
+	tailErr     error
 	lenient     bool
 	indexUsed   bool
 }
@@ -204,7 +210,13 @@ func newReader(r io.ReaderAt, path string, opts ...ReaderOption) (*File, error) 
 		}
 	}
 	if err := f.parse(); err != nil {
-		return nil, err
+		var torn *tornTail
+		if !errors.As(err, &torn) {
+			return nil, err
+		}
+		if f, err = f.dropTornTail(torn); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.indexSidecar != "" && !cfg.indexNoWrite {
 		// A cache write failure leaves the open valid. The next open parses.
@@ -612,7 +624,7 @@ func readTyped(r io.ReaderAt, path string, dt DataType, hasDT bool, spans []span
 	return v, nil
 }
 
-func (f *File) parse() error {
+func (f *File) parse() (err error) {
 	segmentParses.Add(1)
 	if f.size == 0 {
 		return wrap("read", f.path, ErrTruncated)
@@ -620,7 +632,22 @@ func (f *File) parse() error {
 	var order []string
 	haveOrder := false
 	pos := int64(0)
+	// pos only advances past a whole, finished segment. Under
+	// WithLenientTail a format error after at least one of them is a torn
+	// tail: newReader parses again up to pos and drops the rest. declared
+	// is set while the segment at pos has a finite next-segment offset
+	// whose bytes are all in the file. A writer, WithSync or not, publishes
+	// that length only after the segment's bytes are written, so a failure
+	// inside such a segment is corruption or a feature this package does
+	// not read, not a torn write, and is never dropped.
+	declared := false
+	defer func() {
+		if err != nil && f.lenient && pos > 0 && !declared && tornTailError(err) {
+			err = &tornTail{at: pos, err: err}
+		}
+	}()
 	for pos < f.size {
+		declared = false
 		if f.size-pos < leadInSize {
 			return wrapf("read", f.path, ErrTruncated, "%d trailing bytes", f.size-pos)
 		}
@@ -642,6 +669,7 @@ func (f *File) parse() error {
 		if err != nil {
 			return wrapf("read", f.path, err, "segment at %d", pos)
 		}
+		declared = lead.next != incompleteSegment && !truncated
 		hasMeta := lead.toc&TocMetaData != 0
 		if !hasMeta && lead.raw != 0 {
 			return wrapf("read", f.path, ErrCorrupt, "segment at %d has raw-data offset %d without kTocMetaData", pos, lead.raw)
@@ -695,6 +723,55 @@ func (f *File) parse() error {
 	// walk here is a no-op on a uniform file and a full failed-merge scan
 	// on a file whose sample counts never repeat.
 	return nil
+}
+
+// tornTail is a parse failure at byte at, after the last whole segment,
+// that WithLenientTail can drop. It wraps the error a strict Open returns.
+type tornTail struct {
+	at  int64
+	err error
+}
+
+func (t *tornTail) Error() string { return t.err.Error() }
+func (t *tornTail) Unwrap() error { return t.err }
+
+// tornTailError reports a format error: bytes that are not a whole TDMS
+// segment, as a power loss or a crash mid-write leaves them. An I/O error
+// from the underlying reader is not one; it is returned as is. Neither is
+// ErrUnsupported: a well-formed segment that uses a data type or layout
+// this package does not read must fail, not be dropped as torn bytes that
+// a caller would then truncate away.
+func tornTailError(err error) bool {
+	if errors.Is(err, ErrUnsupported) {
+		return false
+	}
+	return errors.Is(err, ErrTruncated) || errors.Is(err, ErrBadTag) || errors.Is(err, ErrVersion) ||
+		errors.Is(err, ErrCorrupt)
+}
+
+// dropTornTail parses f again as if the file ended at t.at, the end of the
+// last whole segment, and records what was dropped. The prefix parsed once
+// already, so a second failure means the reader changed under us; the
+// original error is returned then.
+func (f *File) dropTornTail(t *tornTail) (*File, error) {
+	g := &File{
+		r:       f.r,
+		path:    f.path,
+		size:    t.at,
+		readBuf: f.readBuf,
+		lenient: f.lenient,
+		gindex:  map[string]int{},
+		byPath:  map[string]*Channel{},
+	}
+	if err := g.parse(); err != nil {
+		return nil, t.err
+	}
+	g.truncated = true
+	g.partialTail = false
+	g.unusedTail = 0
+	g.droppedTail = f.size - t.at
+	g.tailErr = t.err
+	return g, nil
 }
 
 func segmentBounds(pos, size int64, lead leadIn, lenient bool) (segEnd, dataPos int64, truncated bool, err error) {

@@ -145,17 +145,33 @@ func TestLenientTail(t *testing.T) {
 	}
 	f.Close()
 
-	// A fragment shorter than a lead-in is still truncated, option or not.
+	// A fragment shorter than a lead-in is truncated strictly. A lenient
+	// open drops it as a torn tail and keeps both whole segments.
 	short := append([]byte(nil), raw...)
 	short = append(short, []byte("TDSm")...)
 	if err := os.WriteFile(path, short, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, WithLenientTail()); !errors.Is(err, ErrTruncated) {
+	if _, err := Open(path); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("strict short lead-in: %v", err)
+	}
+	sf, err := Open(path, WithLenientTail())
+	if err != nil {
 		t.Fatalf("short lead-in: %v", err)
 	}
+	if st := sf.Status(); !st.Truncated || st.Complete || st.DroppedTail != 4 || !errors.Is(st.TailError, ErrTruncated) || st.PartialTail || st.UnusedTail != 0 {
+		t.Fatalf("short lead-in status %#v", st)
+	}
+	sg, _ := sf.Group("g")
+	sc, _ := sg.Channel("c")
+	assertEqual(t, mustValues(t, sc), []float64{1, 2, 3, 4})
+	if sc.committed() != 4 {
+		t.Fatalf("committed %d", sc.committed())
+	}
+	sf.Close()
 
-	// Metadata that itself runs past EOF is still truncated.
+	// Metadata that itself runs past EOF, with no whole segment before it,
+	// is still truncated: there is nothing to keep.
 	var meta le
 	meta.u32(1)
 	meta.str("/'g'/'c'")

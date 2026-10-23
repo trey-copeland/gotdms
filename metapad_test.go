@@ -244,15 +244,22 @@ func TestMetadataPaddingStillRejectsCorruptMetadata(t *testing.T) {
 	if _, err := NewReader(bytes.NewReader(cut)); err == nil {
 		t.Fatal("metadata cut inside an object opened")
 	}
-	// A raw-data offset past EOF is a truncated file, padded or not, and a
-	// lenient open does not accept it either.
+	// A raw-data offset past EOF is a truncated file, padded or not. A
+	// lenient open drops that segment as a torn tail and keeps the ones
+	// before it.
 	offs := leadInOffsets(t, padded)
 	last := offs[len(offs)-2] // the matches-previous segment has metadata
 	past := append([]byte(nil), padded[:last+leadInSize+100]...)
-	for _, opts := range [][]ReaderOption{nil, {WithLenientTail()}} {
-		if _, err := NewReader(bytes.NewReader(past), opts...); !errors.Is(err, ErrTruncated) {
-			t.Fatalf("raw-data offset past EOF (opts %d): %v", len(opts), err)
-		}
+	if _, err := NewReader(bytes.NewReader(past)); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("raw-data offset past EOF: %v", err)
+	}
+	lf, err := NewReader(bytes.NewReader(past), WithLenientTail())
+	if err != nil {
+		t.Fatalf("lenient raw-data offset past EOF: %v", err)
+	}
+	st := lf.Status()
+	if !st.Truncated || st.DroppedTail != int64(len(past)-last) || !errors.Is(st.TailError, ErrTruncated) || lf.SegmentCount() != len(offs)-2 {
+		t.Fatalf("lenient torn tail: %#v segments %d", st, lf.SegmentCount())
 	}
 }
 

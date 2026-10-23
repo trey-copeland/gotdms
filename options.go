@@ -34,14 +34,49 @@ func WithReadBuffer(size int) ReaderOption {
 	}
 }
 
-// WithLenientTail opens a file whose final segment declares a next-segment
-// offset past EOF. Earlier segments are kept, and whole values that fit in
-// the partial tail are readable. File.Status reports Truncated, and those
-// tail samples are not committed, so Follow does not deliver them until the
-// declared length is actually present. Without this option Open returns
-// ErrTruncated and the earlier segments are not available. A trailing
-// fragment shorter than a lead-in, or a final segment whose metadata itself
-// runs past EOF, is still ErrTruncated.
+// WithLenientTail opens a file whose end is not a clean segment boundary
+// and keeps every whole segment before it. Without this option Open returns
+// an error for such a file and nothing in it is available. Two endings are
+// recovered, and File.Status reports Truncated for both:
+//
+//   - A final segment whose finite next-segment offset runs past EOF, with
+//     its metadata present. Whole values that fit in the partial tail are
+//     readable. They are not committed, so Follow does not deliver them
+//     until the declared length is actually present.
+//   - A torn tail: bytes after the last whole segment that do not parse as
+//     a segment. That covers a fragment shorter than a lead-in, zero-filled
+//     blocks, a lead-in whose metadata runs past EOF, and garbage. Those
+//     bytes are dropped, not read. FileStatus.DroppedTail is their length,
+//     and FileStatus.TailError is the error a strict Open returns for them.
+//     This is what a power loss leaves after a WithSync writer's last synced
+//     segment; truncating the file to its size minus DroppedTail repairs it.
+//
+// A file with no whole segment still returns the strict error. I/O errors
+// from the underlying reader are returned, never dropped. So is
+// ErrUnsupported: a segment that uses a data type or layout this package
+// does not read is not a torn write. A segment whose lead-in declares a
+// finite next-segment offset that lies within the file is never dropped
+// either: writers publish that length only after the segment's bytes, so an
+// error inside it is corruption, and Open returns it. What is dropped
+// starts at a lead-in that is short, unreadable (zeros, a bad tag or
+// version), still carries the incomplete-segment sentinel, or declares a
+// length past EOF. The reader cannot tell an unreadable lead-in in the
+// middle of a file from a torn one, so such corruption still ends a lenient
+// file there and every later byte is counted in DroppedTail. Check
+// DroppedTail against what you expect to lose before truncating.
+//
+// A torn tail is not always permanent. A file another process is still
+// writing shows one whenever a lead-in or its metadata is only partly
+// written, and the next open may see a whole segment there. Status reports
+// what this open saw; it cannot tell a writer that is still running from
+// one that stopped. Follow treats a torn tail whose TailError is
+// ErrTruncated as "the writer has not finished" and polls again, delivering
+// the whole segments before it. A torn tail of any other kind (a bad tag,
+// zeros, garbage) stops Follow with that error, as it did before.
+//
+// The segment-index sidecar is never written for a file with a torn tail,
+// and BuildSegmentIndex returns ErrTruncated for one: the sidecar would
+// describe a prefix of the file. Truncate the file first.
 func WithLenientTail() ReaderOption {
 	return func(c *readerConfig) {
 		c.lenientTail = true
@@ -155,10 +190,17 @@ type WriterOption func(*writerConfig)
 //
 // The guarantee is per synced segment. A power loss while a later segment
 // is being written can leave a torn tail after the last synced segment: a
-// partial lead-in, zero-filled blocks, or metadata cut short. Open and
-// WithLenientTail return ErrTruncated or ErrBadTag for such a file; the
-// synced segments are intact on disk, and truncating the file at the end
-// of the last whole segment recovers them.
+// partial lead-in, zero-filled blocks, or metadata cut short. A strict Open
+// returns ErrTruncated or ErrBadTag for such a file. Open it with
+// WithLenientTail to read the synced segments: the torn bytes are dropped,
+// Status reports Truncated, and FileStatus.DroppedTail is their length.
+// Truncating the file to its size minus DroppedTail makes it open strictly
+// again (gotdms info --lenient prints that size). A power loss before a
+// segment's first fsync can also persist its sentinel lead-in and metadata
+// with raw blocks that never reached disk, which may read as zeros. That
+// segment opens as incomplete (Status().Incomplete) and its values are not
+// committed; Follow delivers only committed samples, so it never returns
+// them.
 //
 // Without WithSync the writer never fsyncs. A process crash still leaves a
 // readable file, because the kernel has the bytes, but a power loss or OS

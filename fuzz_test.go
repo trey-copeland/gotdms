@@ -2,9 +2,11 @@ package tdms
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,39 +59,127 @@ func FuzzReader(f *testing.F) {
 	f.Add(multiChunkTwoBuffers())
 	f.Add(widenedFile())
 	f.Add(daqmxSeedPartialTwoBuffers())
+	// Torn tails after whole segments, as a power loss during a WithSync
+	// write leaves them: zeros, a partial lead-in, a lead-in with its
+	// metadata cut short.
+	{
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf)
+		if err != nil {
+			f.Fatal(err)
+		}
+		ch, _ := w.Group("g").Channel("c", TypeFloat64)
+		_ = ch.Write([]float64{1, 2, 3})
+		_ = w.Flush()
+		_ = ch.Write([]float64{4, 5})
+		if err := w.Close(); err != nil {
+			f.Fatal(err)
+		}
+		good := buf.Bytes()
+		f.Add(append(append([]byte(nil), good...), make([]byte, 32)...))
+		f.Add(append(append([]byte(nil), good...), good[:12]...))
+		f.Add(append(append([]byte(nil), good...), good[:leadInSize+6]...))
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		file, err := NewReader(bytes.NewReader(data))
-		if err != nil {
+		strict, serr := NewReader(bytes.NewReader(data))
+		if serr == nil {
+			exerciseFile(t, strict, data)
+			strict.Close()
+		}
+		// The same input with WithLenientTail. It opens whenever the strict
+		// open does, with the same segments and nothing dropped. When it
+		// drops a torn tail, the documented repair (truncate to the size
+		// minus DroppedTail) opens strictly with the same segments.
+		lenient, lerr := NewReader(bytes.NewReader(data), WithLenientTail())
+		if lerr != nil {
+			if serr == nil {
+				t.Fatalf("lenient open failed where strict opened: %v", lerr)
+			}
 			return
 		}
-		defer file.Close()
-		_ = file.Version()
-		_ = file.Properties()
-		_ = file.Status()
-		for _, g := range file.Groups() {
-			_ = g.Properties()
-			for _, ch := range g.Channels() {
-				if ch.Len() > 1<<20 {
-					t.Fatalf("channel %s claims %d values in a %d byte input", ch.Path(), ch.Len(), len(data))
-				}
-				_, _ = ch.Values()
-				_, _ = ch.Float64s()
-				cur := ch.Cursor(3)
-				for i := 0; cur.Next() && i < 8; i++ {
-					_ = cur.Values()
-				}
-				_ = cur.Err()
-				if info, ok := ch.DAQmx(); ok {
-					for _, sc := range info.Scalers {
-						_, _ = ch.DAQmxSlice(sc.ScaleID, 0, ch.Len())
-					}
-					_, _ = ch.DAQmxScaledFloat64s()
-				}
+		defer lenient.Close()
+		st := lenient.Status()
+		if serr == nil {
+			if st != strict.Status() || lenient.SegmentCount() != strict.SegmentCount() {
+				t.Fatalf("lenient %#v (%d segments) differs from strict %#v (%d segments)", st, lenient.SegmentCount(), strict.Status(), strict.SegmentCount())
 			}
-			_, _ = g.Values()
 		}
+		if (st.DroppedTail > 0) != (st.TailError != nil) || st.DroppedTail < 0 || st.DroppedTail > int64(len(data)) {
+			t.Fatalf("dropped tail %d with tail error %v in %d bytes", st.DroppedTail, st.TailError, len(data))
+		}
+		if st.DroppedTail > 0 {
+			if !st.Truncated || serr == nil {
+				t.Fatalf("dropped %d bytes: status %#v, strict error %v", st.DroppedTail, st, serr)
+			}
+			cut := data[:int64(len(data))-st.DroppedTail]
+			repaired, err := NewReader(bytes.NewReader(cut))
+			if err != nil {
+				t.Fatalf("repair to %d bytes does not open strictly: %v", len(cut), err)
+			}
+			if repaired.SegmentCount() != lenient.SegmentCount() {
+				t.Fatalf("repaired file has %d segments, lenient %d", repaired.SegmentCount(), lenient.SegmentCount())
+			}
+			// Dropping the tail must not change what the kept segments
+			// hold: the lenient File reads exactly what the repaired
+			// prefix reads, channel by channel.
+			if got, want := fileDigest(lenient), fileDigest(repaired); got != want {
+				t.Fatalf("lenient read differs from the repaired prefix:\n%s\nwant\n%s", got, want)
+			}
+			if errors.Is(st.TailError, ErrUnsupported) {
+				t.Fatalf("dropped an ErrUnsupported tail: %v", st.TailError)
+			}
+			repaired.Close()
+		}
+		exerciseFile(t, lenient, data)
 	})
+}
+
+// fileDigest renders every group, channel, length, committed count, and
+// value (or read error) of file, for comparing two opens of related inputs.
+func fileDigest(file *File) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "v%d segs%d %v\n", file.Version(), file.SegmentCount(), file.Properties())
+	for _, g := range file.Groups() {
+		fmt.Fprintf(&b, "%s %v\n", g.Name(), g.Properties())
+		for _, ch := range g.Channels() {
+			fmt.Fprintf(&b, "  %v\n", ch.Properties())
+			v, err := ch.Values()
+			fmt.Fprintf(&b, "%s %s n=%d c=%d %v %v\n", ch.Path(), ch.DataType(), ch.Len(), ch.committed(), v, err)
+		}
+	}
+	return b.String()
+}
+
+// exerciseFile reads everything an opened fuzz input claims to hold. It must
+// not panic or allocate far beyond the input.
+func exerciseFile(t *testing.T, file *File, data []byte) {
+	t.Helper()
+	_ = file.Version()
+	_ = file.Properties()
+	_ = file.Status()
+	for _, g := range file.Groups() {
+		_ = g.Properties()
+		for _, ch := range g.Channels() {
+			if ch.Len() > 1<<20 {
+				t.Fatalf("channel %s claims %d values in a %d byte input", ch.Path(), ch.Len(), len(data))
+			}
+			_, _ = ch.Values()
+			_, _ = ch.Float64s()
+			cur := ch.Cursor(3)
+			for i := 0; cur.Next() && i < 8; i++ {
+				_ = cur.Values()
+			}
+			_ = cur.Err()
+			if info, ok := ch.DAQmx(); ok {
+				for _, sc := range info.Scalers {
+					_, _ = ch.DAQmxSlice(sc.ScaleID, 0, ch.Len())
+				}
+				_, _ = ch.DAQmxScaledFloat64s()
+			}
+		}
+		_, _ = g.Values()
+	}
 }
 
 // FuzzSegmentIndex feeds the .gtdx decoder. A decoded sidecar is installed

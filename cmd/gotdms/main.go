@@ -1,7 +1,7 @@
 // Command gotdms prints the structure of an NI TDMS file and exports channel
 // samples to CSV.
 //
-//	gotdms info [--json] file.tdms
+//	gotdms info [--json] [--lenient] file.tdms
 //	gotdms convert [-o out.csv] [--group name] [--channel name] file.tdms
 //	gotdms index [--force] [--check] file.tdms...
 //
@@ -29,12 +29,17 @@ func main() {
 const usageText = `gotdms reads NI TDMS files.
 
 Usage:
-  gotdms info [--json] file.tdms
+  gotdms info [--json] [--lenient] file.tdms
   gotdms convert [-o out.csv] [--group name] [--channel name] file.tdms
   gotdms index [--force] [--check] file.tdms...
 
 info prints groups, channels (data type and sample count), and properties
 at file, group, and channel level. --json prints that tree as JSON.
+--lenient opens a file whose end is not a whole segment (a final segment
+past EOF, or a torn tail such as a power loss leaves) and shows its whole
+segments, the dropped torn-tail bytes, and the byte where the whole
+segments end. Without --lenient such a file fails, and info says whether
+--lenient would recover it.
 
 convert writes channel samples as CSV with a header row. The header cell is
 the channel's TDMS path. With no --group and no --channel, every channel is

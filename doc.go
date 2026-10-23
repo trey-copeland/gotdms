@@ -35,8 +35,9 @@
 //
 // File.Status reports whether the file ended on a finished segment, on the
 // NI incomplete-segment sentinel, or (with WithLenientTail) on a final
-// segment whose next-segment offset runs past EOF. Reads of a file that
-// opens still return whole values in that tail. Follow polls a file that is
+// segment whose next-segment offset runs past EOF or a torn tail after the
+// last whole segment, which is dropped. Reads of a file that opens still
+// return whole values in a past-EOF or sentinel tail. Follow polls a file that is
 // still being written and yields samples only from finished segments.
 // WithSegmentIndex reuses a sidecar of the segment layout when the file's
 // size, modification time, identity, and a fingerprint of the lead-ins and
