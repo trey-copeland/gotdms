@@ -119,9 +119,11 @@
 // decodes the axis again and returns ErrMonotonic if a sample steps
 // backwards. Series.Dt comes from that decode and is 0 when a later step
 // disagrees with the first. ReadMany of several channels in one file opens
-// that file once and decodes a shared clock once; each series then gets its
-// own copy of the time vector so later mutation does not alias. Returned
-// slices are owned by the Series. Waveform fallback does not load samples to
+// that file once and decodes a shared clock once; without WithSharedClock each
+// series then gets its own copy of the time vector so later mutation does not
+// alias. With WithSharedClock the series share one read-only Clock, and
+// with WithoutTimes no time vector is returned. Other returned slices are
+// owned by the Series. Waveform fallback does not load samples to
 // build the span. A waveform window and a declared clock whose catalog step
 // is positive read the sample range with CursorAt and Slice. The samples
 // before the window are not decoded. A declared clock that does not match

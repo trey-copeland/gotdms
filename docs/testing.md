@@ -11,7 +11,7 @@ go test -bench=. ./...
 
 ## Fuzzing
 
-`go test -fuzz=FuzzReader` and `go test -fuzz=FuzzSegmentIndex` compile the fuzz targets. They are not part of `go test` by default.
+`go test -fuzz=FuzzReader` and `go test -fuzz='^FuzzSegmentIndex$'` run the fuzzers. The anchors matter for the second one: `-fuzz` is a regular expression, and an unanchored `FuzzSegmentIndex` also matches `FuzzSegmentIndexTrusted`, so `go test` refuses to fuzz. Fuzzing is not part of `go test` by default.
 
 The other targets are `FuzzSegmentIndexTrusted` in the root package and `FuzzMergeRuns` in `dataset` (`go test -fuzz=FuzzMergeRuns ./dataset`). Their seed corpora run under plain `go test`.
 

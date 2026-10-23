@@ -113,6 +113,10 @@ The Python and Polars package is [github.com/trey-copeland/gotdms-python](https:
 
 `v0.2.0` is the latest tag. Notes for each release are in [CHANGELOG.md](CHANGELOG.md). The tag checklist is in [docs/releasing.md](docs/releasing.md). A tag of this module does not publish the Python package.
 
+## Contributing
+
+Branches, pull requests, and the required checks on `main` are in [CONTRIBUTING.md](CONTRIBUTING.md). The module declares `go 1.22`; CI tests Go 1.22 and 1.27.
+
 ## License
 
 MIT. See [LICENSE](LICENSE). The core module has no third-party Go dependencies.

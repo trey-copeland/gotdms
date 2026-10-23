@@ -8,9 +8,9 @@ Metadata parsing reads the lead-in and the metadata bytes of each segment. Raw s
 
 `Values` issues `ReadAt` for the bytes it needs. A contiguous numeric channel on a little-endian machine is copied straight into the result slice: there is no intermediate `[]byte` and no per-sample `binary.Read`. Big-endian segments are byte-swapped in place after that read. A big-endian host uses the scalar decoder instead of the copy; `decodePackedScalar` is checked against the bulk path in tests. Bools, timestamps, and 80-bit extended values stay on the scalar path everywhere, because their Go layout is not the on-disk layout.
 
-`Cursor` does not use that one-shot `ReadAt`. It reads ahead through a pooled buffer, 256 KiB by default (`WithReadBuffer`), and reuses the batch slice (`Values` is valid only until the next `Next`). A read at least as large as the buffer skips the cache and goes to `ReadAt`. This package does not mmap. A mapping delivers `SIGBUS` if the file is truncated, and it is a poorer default on 32-bit and non-Unix targets.
+`Cursor` does not use that one-shot `ReadAt`. It reads ahead through a pooled buffer, 256 KiB by default (`WithReadBuffer`), and reuses the batch slice (`Values` is valid only until the next `Next`). A read at least as large as the buffer skips the cache and goes to `ReadAt`. A contiguous channel of a fixed-size numeric type also reads each batch straight into the batch slice with `ReadAt` once the batch is at least 32 KiB (4096 `float64` samples), as long as the read buffer is the default size or smaller; smaller batches, other layouts, and a larger `WithReadBuffer` keep the buffered path. This package does not mmap. A mapping delivers `SIGBUS` if the file is truncated, and it is a poorer default on 32-bit and non-Unix targets.
 
-Interleaved fixed-size channels are split out in about 1 MiB windows rather than by allocating the whole multiplexed span once per channel. String channels and mixed-width layouts use the same windowed copy; the string offset table is unchanged.
+Interleaved fixed-size channels are split out in about 1 MiB windows rather than by allocating the whole multiplexed span once per channel. `ReadValues` and `Group.Values` read several channels of one interleaved segment in a single pass over 128 KiB windows, so the multiplexed bytes are read once instead of once per channel. String channels and mixed-width layouts use the same windowed copy; the string offset table is unchanged.
 
 ## Write path
 
@@ -20,27 +20,30 @@ There is no mmap switch. The defaults above are the fast path; the options only 
 
 ## Benchmarks
 
-`BenchmarkChunkStatsFloat64` walks 1,048,576 `float64` samples (8 MiB) in chunks of 4096. On this cloud VM (Linux amd64, 4 vCPU, Intel Xeon, Go 1.22, synthetic data, median of ten `-benchtime=100ms -benchmem` runs) it was 3224 MB/s, 32984 B/op, and 4 allocs/op. That is one 32 KiB chunk plus a few small headers, not a copy of the channel.
-
-`BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `BenchmarkLargeReadFloat64`, `BenchmarkLargeReadFloat64File`, `BenchmarkLargeCursorFile`, `BenchmarkLargeInterleaved`, `BenchmarkLargeWriteFile`, and `BenchmarkLargeWriteMem` move 128 MiB (four float64 channels for the interleaved case). `BenchmarkLargeStreamFile` writes that 128 MiB through `Stream` in 64 KiB chunks. `BenchmarkLargeWriteDiscard` and `BenchmarkLargeStreamDiscard` allocate the samples inside the timed loop and discard the bytes, so `B/op` is the writer's footprint. They run only under `-bench`.
-
-On this VM (Linux amd64, 4 vCPU, Intel Xeon, Go 1.22, `-count=10 -benchtime=100ms`, median), `BenchmarkLargeWriteFile` was 1403 MB/s, 129.00 MiB/op, and 47 allocs/op. The same benchmark before `Write` copied (it aliased the caller's slice on this little-endian host) was 2989 MB/s and 1.00 MiB/op. The copy adds 128 MiB and one allocation, and the median time for one 128 MiB file write went from 44.9 ms to 95.7 ms. `BenchmarkLargeWriteMem` (`bytes.Buffer`) was 1545 MB/s, 258.01 MiB/op, and 43 allocs/op: the encoded copy plus the destination buffer. Before the copy it was 3762 MB/s and 130.01 MiB/op. `BenchmarkLargeStreamFile` does not use that path: 2770 MB/s, 1.05 MiB/op, 2102 allocs/op, one small interface header per 64 KiB chunk. `BenchmarkLargeWriteDiscard` was 4625 MB/s and 257.00 MiB/op (the 128 MiB slice allocated inside the loop, plus the copy). `BenchmarkLargeStreamDiscard` was 1.11 MiB/op.
+`BenchmarkWriteFloat64`, `BenchmarkReadFloat64`, and `BenchmarkStreamFloat64` move 100,000 `float64` values. `BenchmarkLargeReadFloat64`, `BenchmarkLargeReadFloat64File`, `BenchmarkLargeCursorFile`, `BenchmarkLargeInterleaved`, `BenchmarkLargeWriteFile`, and `BenchmarkLargeWriteMem` move 128 MiB (four float64 channels for the interleaved case). `BenchmarkLargeInterleavedOnce` reads the same four interleaved channels in one `ReadValues` pass instead of one `Float64s` call per channel. `BenchmarkLargeInterleavedMany`, `BenchmarkLargeInterleavedManySeparate`, and `BenchmarkLargeInterleavedManyOnce` are the wide case: 32 interleaved channels of 65,536 samples (16 MiB), read per channel or in one `ReadValues` pass. `BenchmarkLargeStreamFile` writes 128 MiB through `Stream` in 64 KiB chunks. `BenchmarkLargeWriteDiscard` and `BenchmarkLargeStreamDiscard` allocate the samples inside the timed loop and discard the bytes, so `B/op` is the writer's footprint. `BenchmarkChunkStatsFloat64` walks 1,048,576 `float64` samples (8 MiB) in chunks of 4096. They run only under `-bench`.
 
 ```bash
-go test -bench=BenchmarkLarge -benchmem -count=10 -benchtime=100ms
+go test -run '^$' -bench 'BenchmarkLarge|BenchmarkChunkStatsFloat64' -benchmem -count=10 -benchtime=100ms
 ```
 
-The After column is the median of those ten runs. benchstat is not vendored, so the median is taken by hand from the ten `-benchmem` lines. "Before" is the same benchmark shape on the library as first imported, measured on this VM before the buffered reader, bulk copy, and streaming writer. That column was not re-run for the copy change. The numbers are indicative, not a hardware claim.
+The figures below are medians of those ten runs (the average of the 5th and 6th sorted runs) on an 8 vCPU Intel Xeon cloud VM, Linux amd64, Go 1.27.3, at `v0.2.0`, with synthetic data. `B/op` and `allocs/op` were the same, or within a few bytes, in every run. Throughput was not: on this shared VM the ten runs of one benchmark were often 1.5× to 3× apart, so read MB/s as an order of magnitude for this machine, not a hardware claim. `b.SetBytes` is the raw sample payload.
 
-| Benchmark | Before | After |
-| --- | --- | --- |
-| Contiguous float64 `Values`, in memory | 2092 MB/s, 256 MiB/op, 30 allocs/op | 3953 MB/s, 128.00 MiB/op, 30 allocs/op |
-| Contiguous float64 `Values`, `os.File` | 1833 MB/s, 256 MiB/op, 34 allocs/op | 3892 MB/s, 128.00 MiB/op, 33 allocs/op |
-| `Cursor` over `os.File`, batch 4096 | 1927 MB/s, 256 MiB/op, 12319 allocs/op | 13281 MB/s, 33.9 KiB/op, 33 allocs/op |
-| 4 interleaved float64 channels, in memory | 348 MB/s, 768 MiB/op, 65 allocs/op | 1781 MB/s, 128.01 MiB/op, 571 allocs/op |
-| Write one float64 channel, `os.File` | 985 MB/s, 512 MiB/op, 44 allocs/op | 1403 MB/s, 129.00 MiB/op, 47 allocs/op |
-| Write one float64 channel, `bytes.Buffer` | 804 MB/s, 640 MiB/op, 41 allocs/op | 1545 MB/s, 258.01 MiB/op, 43 allocs/op |
+| Benchmark | Median MB/s | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| Contiguous float64 `Values`, in memory (`LargeReadFloat64`) | 1515 | 128.00 MiB | 26 |
+| Contiguous float64 `Values`, `os.File` (`LargeReadFloat64File`) | 1794 | 128.00 MiB | 29 |
+| `Cursor` over `os.File`, batch 4096 (`LargeCursorFile`) | 5642 | 33.9 KiB | 29 |
+| 4 interleaved channels, per channel (`LargeInterleaved`) | 1020 | 128.02 MiB | 568 |
+| 4 interleaved channels, one pass (`LargeInterleavedOnce`) | 2072 | 128.13 MiB | 59 |
+| 32 interleaved channels, per channel (`LargeInterleavedMany`) | 471 | 16.04 MiB | 829 |
+| 32 interleaved channels, one pass (`LargeInterleavedManyOnce`) | 3724 | 16.16 MiB | 325 |
+| Write one channel, `os.File` (`LargeWriteFile`) | 1062 | 129.00 MiB | 47 |
+| Write one channel, `bytes.Buffer` (`LargeWriteMem`) | 1471 | 258.01 MiB | 43 |
+| `Stream` to `os.File`, 64 KiB chunks (`LargeStreamFile`) | 2041 | 1.05 MiB | 2101 |
+| Write, discarded (`LargeWriteDiscard`) | 3618 | 257.00 MiB | 41 |
+| `Stream`, discarded (`LargeStreamDiscard`) | 43250 | 1.11 MiB | 2095 |
+| Chunk statistics, batch 4096 (`ChunkStatsFloat64`) | 3034 | 32,984 B | 4 |
 
-`b.SetBytes` is the raw sample payload (128 MiB, or 128 MiB across the four interleaved channels). The cursor's allocation is the reused batch buffer: one scan does not allocate a fresh slice per batch. The file write's 129 MiB is the 128 MiB copy plus the 1 MiB write buffer. The in-memory write allocates that copy plus the destination `bytes.Buffer`.
+The cursor's allocation is the reused 32 KiB batch: one scan does not allocate a fresh slice per batch, and at that size it reads with `ReadAt` straight into the batch. Chunk statistics is likewise one 32 KiB chunk plus a few small headers, not a copy of the channel. `Write` copies the caller's samples, so the file write's 129 MiB is the 128 MiB copy plus the 1 MiB write buffer, and the in-memory write is that copy plus the destination `bytes.Buffer`. `WriteDiscard` adds the 128 MiB sample slice allocated inside the loop. `Stream` does not copy the samples: one small interface header per 64 KiB chunk. Reading interleaved channels in one pass is faster than one call per channel because each channel read walks the shared span again.
 
 The segment-index open benchmark is in [Segment index](segment-index.md#benchmark), and the dataset tail-window benchmark is in [Datasets](dataset.md#benchmarks).

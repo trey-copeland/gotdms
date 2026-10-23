@@ -2,14 +2,14 @@
 
 A Go library is distributed by a version tag. The module proxy (`proxy.golang.org`) fetches the tag from GitHub. This repository does not publish binaries for the library.
 
-`v0.2.0` (2026-10-23) is the latest tag, at the release-notes commit. Earlier tags: `v0.1.2` at `8d2f134`, `v0.1.1` at `7d514a7`, and `v0.1.0` at `622cb34`. Each version uses the same `vX.Y.Z` steps. [CHANGELOG.md](../CHANGELOG.md) holds the notes: an empty `Unreleased` heading, then one `vX.Y.Z` section per release. The Python package is [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python). It was extracted from this repository on 2026-10-19 and is not on PyPI. This checklist does not publish it.
+`v0.2.0` (2026-10-23) is the latest tag, at the release-notes commit. Earlier tags: `v0.1.2` at `8d2f134`, `v0.1.1` at `7d514a7`, and `v0.1.0` at `622cb34`. Each version uses the same `vX.Y.Z` steps. `main` is protected by a ruleset (one approving review and the required checks; see [CONTRIBUTING.md](../CONTRIBUTING.md)), so changes, including the changelog, land through a pull request. Only repository admins can push `v*` tags, so an admin runs the tag step. [CHANGELOG.md](../CHANGELOG.md) holds the notes: an empty `Unreleased` heading, then one `vX.Y.Z` section per release. The Python package is [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python). It was extracted from this repository on 2026-10-19 and is not on PyPI. This checklist does not publish it.
 
 `.github/workflows/build-and-test-go-module.yml` is on `main`. This checklist requires that workflow to be green for the commit you tag, including the `differential test against npTDMS` job. That job installs npTDMS 1.13.0 (LGPL-3.0-only) with pip as a CI-only oracle. It is not a Go dependency and is not shipped. This document does not add a second copy of that workflow. `.github/workflows/test-and-publish-go-release.yml` is also on `main`. It runs only when a `v*` tag is pushed, re-checks this module, and opens a GitHub Release. It does not build binaries, it does not publish to PyPI, and it does not talk to the module proxy.
 
 ## Before the tag
 
 1. Confirm `main` is the commit you mean. `git log -1` and the `vX.Y.Z` section in the changelog must describe that commit. Notes for the version you are about to tag belong in that section. `Unreleased` stays empty.
-2. Confirm the latest run of `.github/workflows/build-and-test-go-module.yml` on that commit is green, including the `differential test against npTDMS` job.
+2. Confirm the latest run of `.github/workflows/build-and-test-go-module.yml` on that commit is green: `test (ubuntu, go 1.22)`, `test (ubuntu, go 1.27)`, `test (windows, go 1.22)`, and `differential test against npTDMS`.
 3. From a clean checkout of that commit:
 
    ```bash
@@ -32,11 +32,11 @@ A Go library is distributed by a version tag. The module proxy (`proxy.golang.or
    ```
 
    There must be no `require` block. `go 1.22` is the minimum the module declares. CI also builds with Go 1.27.
-5. Commit the changelog on `main` before you tag. The tag points at the commit that contains the notes.
+5. Merge the changelog to `main` through a pull request before you tag. The tag points at the commit that contains the notes.
 
 ## Tag and GitHub release
 
-The tag is a semver tag with a leading `v`. Substitute the version you are releasing for `vX.Y.Z`.
+The tag is a semver tag with a leading `v`. Substitute the version you are releasing for `vX.Y.Z`. Only a repository admin can push it.
 
 ```bash
 git checkout main
