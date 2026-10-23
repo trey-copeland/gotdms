@@ -51,11 +51,14 @@ jobs:
         if: matrix.race
         run: go test -race ./dataset/
 
-  # npTDMS (https://github.com/adamreeve/npTDMS) is LGPL-2.1. It is a CI-only
+  # npTDMS (https://github.com/adamreeve/npTDMS) is LGPL-3.0-only (the
+  # License-Expression in npTDMS 1.13.0's package metadata). It is a CI-only
   # oracle: this job installs it with pip and never imports it from Go. It is
   # not linked into the module, not vendored, and not shipped. The core go.mod
   # stays free of third-party dependencies. There is no LabVIEW in this
-  # environment, so npTDMS is the external behavior anchor.
+  # environment, so npTDMS is the external behavior anchor. The version is
+  # pinned so a new npTDMS release cannot turn this job red without a code
+  # change; bump it deliberately.
   nptdms:
     name: differential test against npTDMS
     runs-on: ubuntu-latest
@@ -72,7 +75,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install npTDMS
-        run: pip install npTDMS pytest
+        run: pip install npTDMS==1.13.0 pytest
       - name: compare gotdms and npTDMS
         run: python testdata/nptdms/harness.py
 

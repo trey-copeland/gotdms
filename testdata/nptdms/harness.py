@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare gotdms and npTDMS in both directions.
 
-npTDMS is LGPL-2.1 and is used only as a CI oracle. It is not linked or
+npTDMS is LGPL-3.0-only and is used only as a CI oracle. It is not linked or
 shipped. This tree has no LabVIEW, so npTDMS is the external anchor.
 Strings in these files do not end in NUL: gotdms drops one trailing NUL
 on read and npTDMS does not.

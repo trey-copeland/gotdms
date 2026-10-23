@@ -5,9 +5,9 @@ This directory is the CI oracle for files this module did not write itself.
 and reads them with `roundtrip.go`, then the other way around.
 
 There is no LabVIEW install in this environment, so npTDMS is the external
-anchor. npTDMS is LGPL-2.1. It is installed with pip in the differential
-CI job only. It is not imported by the Go module, not linked, and not
-shipped. `go.mod` has no third-party requirements.
+anchor. npTDMS is LGPL-3.0-only. CI installs version 1.13.0 with pip in
+the differential job only. It is not imported by the Go module, not
+linked, and not shipped. `go.mod` has no third-party requirements.
 
 The NI five-segment worked example is hex in `golden_test.go`
 (`TestGoldenNIFiveSegments`), copied from the NI article, not generated here.

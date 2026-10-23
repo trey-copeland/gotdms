@@ -6,6 +6,7 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 - The internal `mustMul` helper panics on int64 overflow instead of returning 0. Every caller passes a product that earlier checks already bound to the raw-data length, so no file reaches it; a 0 would have addressed the wrong bytes without an error.
 - `FuzzSegmentIndex` creates its data file once per worker instead of once per input, seeds a sidecar that is a hit for that file, and skips the sidecar rewrite after a miss through an unexported test-only option. Exported `Open` behavior is unchanged: a miss still replaces the sidecar atomically with fsync. Local throughput went from about 1.5k to about 14.5k executions per second (median of three 15-second runs).
+- CI pins npTDMS to 1.13.0 in the `differential test against npTDMS` job, so a new npTDMS release cannot fail CI without a code change. The workflow comment, README, `docs/releasing.md`, and `testdata/nptdms` now give npTDMS's license as LGPL-3.0-only, which is what npTDMS 1.13.0's package metadata declares. Earlier text, including the v0.1.0 entry below, said LGPL-2.1. npTDMS is still a CI-only oracle and is not a dependency.
 
 ## v0.1.2 (2026-10-23)
 

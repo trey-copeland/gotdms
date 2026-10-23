@@ -53,7 +53,7 @@ go test ./...
 go test -bench=. ./...
 ```
 
-`go test -fuzz=FuzzReader` and `go test -fuzz=FuzzSegmentIndex` compile the fuzz targets. They are not part of `go test` by default. `testdata/nptdms` is the differential harness against npTDMS. That package is LGPL and runs only in CI; it is not a Go dependency. There is no LabVIEW here, so npTDMS is the external anchor. See `testdata/nptdms/README.md`.
+`go test -fuzz=FuzzReader` and `go test -fuzz=FuzzSegmentIndex` compile the fuzz targets. They are not part of `go test` by default. `testdata/nptdms` is the differential harness against npTDMS. That package is LGPL-3.0-only, is pinned to 1.13.0, and runs only in CI; it is not a Go dependency. There is no LabVIEW here, so npTDMS is the external anchor. See `testdata/nptdms/README.md`.
 
 ## Write
 
