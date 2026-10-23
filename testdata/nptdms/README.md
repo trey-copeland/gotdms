@@ -2,7 +2,9 @@
 
 This directory is the CI oracle for files this module did not write itself.
 `harness.py` writes TDMS files with [npTDMS](https://github.com/adamreeve/npTDMS)
-and reads them with `roundtrip.go`, then the other way around.
+and reads them with `roundtrip.go`, then the other way around. It runs only
+in the `differential test against npTDMS` CI job; `go test ./...` does not
+run it, and nothing outside that job needs npTDMS.
 
 There is no LabVIEW install in this environment, so npTDMS is the external
 anchor. npTDMS is LGPL-3.0-only. CI installs version 1.13.0 with pip in
@@ -18,10 +20,13 @@ channels. npTDMS 1.13 writes contiguous segments only, so the interleaved
 file is written by gotdms and read by npTDMS. Extended-float bytes are not compared:
 that layout is spec-derived and npTDMS does not write it.
 
-DAQmx files are also generated in that job, not checked in. `harness.py`
-calls npTDMS's own test helpers (`daqmx_scaler_metadata`,
-`digital_scaler_metadata`, `daqmx_channel_metadata`, `GeneratedFile`) to
-build the bytes, then compares gotdms `Float64s` with npTDMS `raw_data`
+DAQmx files are also generated in that job, not checked in. In that CI
+job only, `harness.py` imports npTDMS's own test helpers (among them
+`daqmx_scaler_metadata`, `digital_scaler_metadata`,
+`daqmx_channel_metadata`, `GeneratedFile`) at run time from the npTDMS
+package the job installed (`nptdms.test.test_daqmx` and
+`nptdms.test.util`). Their code is not copied into this repository. They
+build the bytes; the harness then compares gotdms `Float64s` with npTDMS `raw_data`
 (`read_data(scaled=False)`). One file carries a linear `NI_Scale`. Both
 sides are checked against the raw samples. npTDMS does not apply that scale
 through `channel[:]` for a DAQmx raw buffer, so the harness does not call

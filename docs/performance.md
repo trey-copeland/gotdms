@@ -26,7 +26,7 @@ There is no mmap switch. The defaults above are the fast path; the options only 
 go test -run '^$' -bench 'BenchmarkLarge|BenchmarkChunkStatsFloat64' -benchmem -count=10 -benchtime=100ms
 ```
 
-The figures below are medians of those ten runs (the average of the 5th and 6th sorted runs) on an 8 vCPU Intel Xeon cloud VM, Linux amd64, Go 1.27.3, at `v0.2.0`, with synthetic data. `B/op` and `allocs/op` were the same, or within a few bytes, in every run. Throughput was not: on this shared VM the ten runs of one benchmark were often 1.5× to 3× apart, so read MB/s as an order of magnitude for this machine, not a hardware claim. `b.SetBytes` is the raw sample payload.
+The figures below are medians of those ten runs (the average of the 5th and 6th sorted runs) on an 8 vCPU Intel Xeon cloud VM, Linux amd64, Go 1.27.3, at `v0.2.0`, with synthetic data. `B/op` was the same, or within a few bytes, in every run, and `allocs/op` within two. Throughput was not: on this shared VM the fastest of the ten runs of one benchmark was 1.05× to 4.9× the slowest, and a second set of ten runs on the same VM gave medians from 0.69× (`LargeWriteDiscard`) to 1.63× (`LargeReadFloat64`) of the ones below. Read MB/s as an order of magnitude for this machine, not a hardware claim. `b.SetBytes` is the raw sample payload.
 
 | Benchmark | Median MB/s | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
@@ -36,6 +36,7 @@ The figures below are medians of those ten runs (the average of the 5th and 6th 
 | 4 interleaved channels, per channel (`LargeInterleaved`) | 1020 | 128.02 MiB | 568 |
 | 4 interleaved channels, one pass (`LargeInterleavedOnce`) | 2072 | 128.13 MiB | 59 |
 | 32 interleaved channels, per channel (`LargeInterleavedMany`) | 471 | 16.04 MiB | 829 |
+| 32 interleaved channels, per channel, on the `ManyOnce` fixture (`LargeInterleavedManySeparate`) | 454 | 16.04 MiB | 829 |
 | 32 interleaved channels, one pass (`LargeInterleavedManyOnce`) | 3724 | 16.16 MiB | 325 |
 | Write one channel, `os.File` (`LargeWriteFile`) | 1062 | 129.00 MiB | 47 |
 | Write one channel, `bytes.Buffer` (`LargeWriteMem`) | 1471 | 258.01 MiB | 43 |

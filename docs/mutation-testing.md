@@ -36,7 +36,7 @@ gremlins unleash \
   --output-statuses lct
 ```
 
-`dataset/`, `cmd/`, and `examples/` are other packages. The root package is the whole run. `--timeout-coefficient 4` sets each mutant's test timeout to four times the coverage run, so a mutant that hangs is stopped and reported as `TIMED OUT`. `--output-statuses lct` prints lived, not-covered, and timed-out mutants. The JSON file has every mutant. `gremlins-report.json` is gitignored.
+`dataset/`, `cmd/`, and `examples/` are other packages. The run covers the root package, and Gremlins also lists mutants in `testdata/nptdms/roundtrip.go`, the differential harness's `package main`: the command does not exclude `testdata/`, and `go test` never runs that file, so every one of its mutants is `NOT COVERED`. `--timeout-coefficient 4` sets each mutant's test timeout to four times the coverage run, so a mutant that hangs is stopped and reported as `TIMED OUT`. `--output-statuses lct` prints lived, not-covered, and timed-out mutants. The JSON file has every mutant. `gremlins-report.json` is gitignored.
 
 `--threshold-efficacy 0` and `--threshold-mcover 0` are the defaults. Gremlins then does not exit 10 or 11 for a low score. A crash, or a coverage run that cannot execute the tests, still exits non-zero.
 
@@ -76,6 +76,6 @@ Triage each one:
 2. An equivalent mutant: no test can kill it, because the mutated program does the same thing. Leave the code, and write down the one-line reason.
 3. Dead or wrong code: change the library only when the change is clearly a bug, and add a regression test.
 
-Stop when what remains is equivalent, or the next test would only pin a change nothing can observe. Do not chase a mutant-coverage number. The not-covered set in the run above is spread over `value.go`, `waveform.go`, `reader.go`, `timestamp.go`, `fastwrite.go`, and a few other files: mostly per-type scalar decode and encode loops that the bulk path bypasses on a little-endian host (including the big-endian stores in `fastwrite.go`), range checks in property conversion, and defensive branches the suite does not enter.
+Stop when what remains is equivalent, or the next test would only pin a change nothing can observe. Do not chase a mutant-coverage number. Of the 191 not-covered mutants in the run above, 47 are in `testdata/nptdms/roundtrip.go` (see above). The other 144 are spread over `value.go` (23), `waveform.go` (22), `reader.go` (20), `timestamp.go` (14), `fastwrite.go` (14), and a few other files: mostly per-type scalar decode and encode loops that the bulk path bypasses on a little-endian host (including the big-endian stores in `fastwrite.go`), range checks in property conversion, and defensive branches the suite does not enter.
 
 The nightly job uploads `gremlins-report.json` as the `gremlins-report` artifact, including when the step fails. The job limit is 90 minutes (`timeout-minutes: 90`). The measured run above took 29 minutes with four workers on an 8 vCPU VM; a GitHub-hosted runner may be slower, so the limit leaves room. If a later run starts printing `TIMED OUT` for mutants that are not hangs, raise `--timeout-coefficient` rather than treating those rows as gaps. If the root package grows past the job limit, narrow `--exclude-files` or split the run by file and say which files ran.
