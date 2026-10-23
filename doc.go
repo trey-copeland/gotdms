@@ -12,6 +12,46 @@
 //
 //	https://www.ni.com/en/support/documentation/supplemental/07/tdms-file-format-internal-structure.html
 //
+// The package is pure Go with no cgo and no third-party dependencies. The
+// package name is tdms; the module path is github.com/trey-copeland/gotdms.
+//
+// # Example
+//
+// Write one channel in two segments, then read it back whole and in batches:
+//
+//	w, err := tdms.Create("run.tdms")
+//	if err != nil {
+//		return err
+//	}
+//	ch, err := w.Group("acquisition").Channel("temperature", tdms.TypeFloat64)
+//	if err != nil {
+//		return err
+//	}
+//	if err := ch.Write([]float64{21.5, 21.7, 22.0, 22.4}); err != nil {
+//		return err
+//	}
+//	if err := w.Flush(); err != nil { // ends the first segment
+//		return err
+//	}
+//	if err := ch.Write([]float64{22.8}); err != nil {
+//		return err
+//	}
+//	if err := w.Close(); err != nil {
+//		return err
+//	}
+//
+//	f, err := tdms.Open("run.tdms")
+//	if err != nil {
+//		return err
+//	}
+//	defer f.Close()
+//	g, _ := f.Group("acquisition")
+//	c, _ := g.Channel("temperature")
+//	values, err := c.Float64s() // [21.5 21.7 22 22.4 22.8]
+//
+// ExampleCreate is the compile-checked version. The repository's docs
+// directory has one page per topic; see the Documentation section below.
+//
 // # Reading
 //
 // Open or NewReader parses every segment's metadata up front and does not load
@@ -60,6 +100,14 @@
 // or complex slice; the caller must not mutate it until Flush or Close.
 // Flush streams the channel buffer and does not allocate a second full copy.
 //
+// By default the writer never calls fsync, so the incomplete-segment rule
+// protects against a process crash, not a power loss or OS crash. WithSync
+// (Create(path, WithSync())) writes each segment with the sentinel, fsyncs,
+// patches the length, and fsyncs again; Create also syncs the parent
+// directory once (skipped on Windows). Writer.Sync writes the pending segment
+// and fsyncs with or without the option. A power loss during a later segment
+// can leave a torn tail, which WithLenientTail recovers on read.
+//
 // Stream declares each channel's value count, writes the segment header, and
 // copies later chunks straight to the underlying writer. Memory stays within
 // the write buffer plus the chunk being written. String channels stay on
@@ -80,5 +128,40 @@
 // single-file reader and writer.
 //
 // Malformed input returns an error. The package does not panic on truncated or
-// corrupt files.
+// corrupt files. Errors wrap a sentinel such as ErrTruncated, ErrCorrupt, or
+// ErrUnsupported; test them with errors.Is. Most also carry the operation
+// and path in an *Error.
+//
+// # Documentation
+//
+// The README is a short tour. The reference pages in the repository's docs
+// directory cover each topic in full. They track the main branch, so they
+// can describe changes newer than the version shown here; CHANGELOG.md says
+// what each release contains.
+//
+//   - [Reading]: Open, Values, Cursor, typed helpers, chunk statistics.
+//   - [Writing]: Create, Flush, Write copy semantics, WithSync, Stream.
+//   - [Waveforms]: Waveform, ReadWaveform, WaveformHeader, scales.
+//   - [File status]: File.Status, WithLenientTail, torn tails, Follow.
+//   - [Datasets]: the dataset subpackage.
+//   - [DAQmx]: DAQmx raw-data layouts and scaling.
+//   - [API]: a table of the exported API, channel order, and errors.
+//   - [Format and support]: the support matrix and format choices.
+//   - [CLI]: the gotdms command.
+//   - [Segment index]: the .gtdx sidecar.
+//   - [Performance]: read and write paths and benchmarks.
+//   - [Testing]: fuzzing, golden tests, and the CI-only npTDMS oracle.
+//
+// [Reading]: https://github.com/trey-copeland/gotdms/blob/main/docs/reading.md
+// [Writing]: https://github.com/trey-copeland/gotdms/blob/main/docs/writing.md
+// [Waveforms]: https://github.com/trey-copeland/gotdms/blob/main/docs/waveforms.md
+// [File status]: https://github.com/trey-copeland/gotdms/blob/main/docs/file-status.md
+// [Datasets]: https://github.com/trey-copeland/gotdms/blob/main/docs/dataset.md
+// [DAQmx]: https://github.com/trey-copeland/gotdms/blob/main/docs/daqmx.md
+// [API]: https://github.com/trey-copeland/gotdms/blob/main/docs/api.md
+// [Format and support]: https://github.com/trey-copeland/gotdms/blob/main/docs/format.md
+// [CLI]: https://github.com/trey-copeland/gotdms/blob/main/docs/cli.md
+// [Segment index]: https://github.com/trey-copeland/gotdms/blob/main/docs/segment-index.md
+// [Performance]: https://github.com/trey-copeland/gotdms/blob/main/docs/performance.md
+// [Testing]: https://github.com/trey-copeland/gotdms/blob/main/docs/testing.md
 package tdms

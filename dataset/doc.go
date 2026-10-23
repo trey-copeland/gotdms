@@ -1,5 +1,32 @@
 // Package dataset reads sets of TDMS files as one catalog.
 //
+// Open a directory, declare the timestamp channel, and read a window of
+// several channels merged across files:
+//
+//	ds, err := dataset.OpenGlob(dir, "*.tdms",
+//		dataset.WithTimestampChannelName("Time"),
+//		dataset.WithNumericEpoch(time.Unix(0, 0).UTC()),
+//	)
+//	if err != nil {
+//		return err
+//	}
+//	series, err := ds.ReadMany(
+//		[]dataset.Selector{{Name: "ai0"}, {Name: "ai1"}},
+//		start, end,
+//		dataset.WithReadBasis(trigger),
+//	)
+//	if err != nil {
+//		return err
+//	}
+//	for _, s := range series {
+//		_ = s.RelativeTimes() // seconds since trigger; negative before it
+//	}
+//
+// Example is the compile-checked version. ExampleWithSharedClock and
+// ExampleWithoutTimes show the two memory-saving read options. The
+// [Datasets] page in the repository's docs directory has the full
+// reference and the benchmarks.
+//
 // You declare which channel carries time. WithTimestampChannelName names that
 // channel for every group. WithTimestampChannel names it for one group and
 // overrides the global name; an empty name opts that group out of the global
@@ -114,6 +141,10 @@
 // per file (path plus ".gtdx"). The cache is validated by tdms and ignored
 // when it does not match the file. It is off unless the option is passed.
 //
+// WithLenientTail opens every file with tdms.WithLenientTail for indexing
+// and reads, so a torn tail is dropped instead of failing the catalog.
+// Dataset.FileStatus reports each indexed file's tdms.FileStatus.
+//
 // Catalog and reads use a bounded worker pool (WithWorkers, WithReadWorkers).
 // ReadMany's pool is the whole call: it does not start another pool per
 // selector, so the worker count is also the cap on files open at once.
@@ -121,4 +152,6 @@
 // that many files together and can exhaust the process file-descriptor limit.
 // An error closes every file that call opened. Open does not keep file
 // handles after it returns. Reads do not keep them either.
+//
+// [Datasets]: https://github.com/trey-copeland/gotdms/blob/main/docs/dataset.md
 package dataset
