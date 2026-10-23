@@ -23,9 +23,17 @@ jobs:
   mutation:
     name: gremlins (core package)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 minutes was too short once daqmx.go landed: run 3 was cancelled
+    # at the limit in writer.go. The .gtdx sidecar code adds more mutants.
+    timeout-minutes: 90
     steps:
+      # Same checkout as build-and-test-go-module.yml. The coverage run is a
+      # full `go test`, and TestSegmentIndexV010MissesVersion2 reads v0.1.0
+      # with git. Gremlins copies .git into each worker directory.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
