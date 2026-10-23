@@ -410,7 +410,7 @@ A nightly [Gremlins](https://github.com/go-gremlins/gremlins) run checks the cor
 
 ## Releasing
 
-`v0.1.0` is tagged. Notes for each release are in [CHANGELOG.md](CHANGELOG.md). The tag checklist is in [docs/releasing.md](docs/releasing.md). A tag of this module does not publish the Python package.
+`v0.1.1` is tagged. Notes for `v0.1.2` are in [CHANGELOG.md](CHANGELOG.md). The tag checklist is in [docs/releasing.md](docs/releasing.md). A tag of this module does not publish the Python package.
 
 ## License
 

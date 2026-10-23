@@ -4,6 +4,10 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
+## v0.1.2 (2026-10-23)
+
+`v0.1.2` is the changes since `v0.1.1` (`7d514a7`). The release-workflow checkout and the module-cache test skip landed in `e2bd37c` ([#18](https://github.com/trey-copeland/gotdms/pull/18)). The metadata-gap fix for NI HSAI DAQmx captures landed in `53fa09e` ([#19](https://github.com/trey-copeland/gotdms/pull/19)).
+
 ### Fixed
 
 - A segment whose raw-data offset points past the end of its object list opens. The bytes between the last object and the offset are skipped, which is what npTDMS does and what the lead-in's raw-data offset defines. Before, the open failed with `N unused metadata bytes: corrupt TDMS structure`. NI DAQ high-speed captures (2621 and about 3607 bytes past the object list) hit this with DAQmx raw data. The skip starts only after the declared object count has been read in full: an object list that ends inside its metadata, or a raw-data offset past EOF, still fails the open. The sidecar fingerprint already covers those skipped bytes.
