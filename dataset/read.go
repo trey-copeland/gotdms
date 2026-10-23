@@ -23,10 +23,22 @@ type piece struct {
 	times []time.Time
 	timed bool
 	// wave describes a waveform axis whose times were not built, only with
-	// WithSharedClock. clockCache.merge builds a Clock from it, or Times when
-	// the piece is merged with others.
+	// WithSharedClock or WithoutTimes. clockCache.merge builds a Clock from
+	// it, or Times when the piece is merged with others. timeAt computes one
+	// sample time without building the axis.
 	wave   *waveKey
 	waveT0 time.Time
+}
+
+// timeAt is the time of sample i of a timed piece.
+func (p *piece) timeAt(i int) time.Time {
+	if p.wave == nil {
+		return p.times[i]
+	}
+	// readWaveform checked the first and last sample of a lazy piece, and
+	// waveformAt grows with |i|, so every index in between converts.
+	t, _ := waveformAt(p.waveT0, math.Float64frombits(p.wave.inc), p.wave.i0+int64(i))
+	return t
 }
 
 func readOccurrence(o Occurrence, opt options, start, end time.Time, window, lazyWave bool) (piece, error) {
@@ -94,6 +106,12 @@ func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window, 
 	if lazy && len(y) > 0 {
 		first, err := waveformAt(t0, inc, i0)
 		if err != nil {
+			return piece{}, err
+		}
+		// The eager path fails on any sample time that does not convert.
+		// The last one is the largest offset, so checking it fails the
+		// same reads without building the axis.
+		if _, err := waveformAt(t0, inc, i0+int64(len(y))-1); err != nil {
 			return piece{}, err
 		}
 		p.y = y
@@ -736,22 +754,41 @@ func indexToInt(v int64) (int, error) {
 	return int(v), nil
 }
 
-func mergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
+// keptRun is the samples p.y[i0:i1] that mergePieces kept, in output
+// order. Keeping runs instead of one time, dt, and file per sample lets a
+// merge compare times without materializing them, which WithoutTimes needs.
+type keptRun struct {
+	p      *piece
+	i0, i1 int
+}
+
+func lastTime(runs []keptRun) time.Time {
+	r := runs[len(runs)-1]
+	return r.p.timeAt(r.i1 - 1)
+}
+
+// mergePieces orders, de-overlaps, and joins pieces. wantTimes false leaves
+// Series.Times nil; timed pieces may then be lazy waveforms.
+func mergePieces(pieces []piece, policy OverlapPolicy, wantTimes bool) (Series, error) {
 	kept := 0
-	var only piece
-	for _, p := range pieces {
-		if len(p.y) == 0 {
+	var only *piece
+	total := 0
+	for i := range pieces {
+		if len(pieces[i].y) == 0 {
 			continue
 		}
 		kept++
-		only = p
+		total += len(pieces[i].y)
+		only = &pieces[i]
 	}
 	// One file (or a window that hit one file) already owns its slices.
 	// Copying them into a new series buffer is a full extra pass.
 	if kept == 1 {
 		s := Series{Files: []string{only.file}, Y: only.y}
-		if only.timed && len(only.times) > 0 {
-			s.Times = only.times
+		if only.timed && (len(only.times) > 0 || only.wave != nil) {
+			if wantTimes {
+				s.Times = pieceTimes(only)
+			}
 			s.Timed = true
 			if only.dt > 0 {
 				s.Dt = only.dt
@@ -760,106 +797,158 @@ func mergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
 		return s, nil
 	}
 	var y []float64
-	var times []time.Time
-	var dts []float64
-	var src []string
+	if total > 0 {
+		y = make([]float64, 0, total)
+	}
+	var runs []keptRun
 	var gaps []Gap
-	for _, p := range pieces {
+	var first *piece
+	for pi := range pieces {
+		p := &pieces[pi]
 		if len(p.y) == 0 {
 			continue
 		}
-		if p.timed && len(p.times) != len(p.y) {
+		if p.timed && p.wave == nil && len(p.times) != len(p.y) {
+			return Series{}, ErrArgument
+		}
+		// The overlap checks read the last kept run's times, so every
+		// piece must be timed or every piece untimed. Read, ReadWindow, and
+		// ReadMany already reject mixed time axes; this keeps a future
+		// caller from an index panic in timeAt.
+		if first == nil {
+			first = p
+		} else if p.timed != first.timed {
 			return Series{}, ErrArgument
 		}
 		for i := range p.y {
 			// Samples inside one file stay in file order, including equal
 			// timestamps and a zero waveform increment. Overlap and gap policy
 			// applies where a new file meets samples already kept.
-			sameFile := len(src) > 0 && src[len(src)-1] == p.file
-			if p.timed && len(times) > 0 && !sameFile {
-				last := times[len(times)-1]
-				lastDt := dts[len(dts)-1]
-				t := p.times[i]
+			if p.timed && len(runs) > 0 && runs[len(runs)-1].p.timed && runs[len(runs)-1].p.file != p.file {
+				last := lastTime(runs)
+				lastDt := runs[len(runs)-1].p.dt
+				t := p.timeAt(i)
 				if overlaps(t, last, lastDt) {
 					switch policy {
 					case OverlapError:
-						return Series{}, fmtOverlap(uniqueFiles(src), p.file, t)
+						return Series{}, fmtOverlap(runFiles(runs), p.file, t)
 					case OverlapKeepFirst:
 						continue
 					case OverlapKeepLast:
-						for len(times) > 0 && !times[len(times)-1].Before(t) {
-							times = times[:len(times)-1]
+						for len(runs) > 0 && !lastTime(runs).Before(t) {
 							y = y[:len(y)-1]
-							dts = dts[:len(dts)-1]
-							src = src[:len(src)-1]
+							r := &runs[len(runs)-1]
+							r.i1--
+							if r.i1 == r.i0 {
+								runs = runs[:len(runs)-1]
+							}
 						}
-						trimGaps(&gaps, times)
+						trimGaps(&gaps, runs)
 					default:
 						return Series{}, ErrArgument
 					}
 				}
-				if len(times) > 0 {
-					last = times[len(times)-1]
-					lastDt = dts[len(dts)-1]
+				if len(runs) > 0 {
+					last = lastTime(runs)
+					lastDt = runs[len(runs)-1].p.dt
 					if gapBetween(t, last, lastDt) {
 						gaps = append(gaps, Gap{From: addDt(last, lastDt), To: t})
 					}
 				}
 			}
 			y = append(y, p.y[i])
-			dts = append(dts, p.dt)
-			src = append(src, p.file)
-			if p.timed {
-				times = append(times, p.times[i])
+			if n := len(runs); n > 0 && runs[n-1].p == p && runs[n-1].i1 == i {
+				runs[n-1].i1++
+			} else {
+				runs = append(runs, keptRun{p: p, i0: i, i1: i + 1})
 			}
 		}
 	}
-	s := Series{Files: uniqueFiles(src), Y: y, Gaps: gaps}
-	if len(times) > 0 {
-		s.Times = times
-		s.Timed = true
+	s := Series{Files: runFiles(runs), Y: y, Gaps: gaps}
+	timedKept := 0
+	for _, r := range runs {
+		if r.p.timed {
+			timedKept += r.i1 - r.i0
+		}
 	}
-	if dt, ok := uniformSampleDt(dts); ok {
+	if timedKept > 0 {
+		s.Timed = true
+		if wantTimes {
+			times := make([]time.Time, 0, timedKept)
+			for _, r := range runs {
+				if !r.p.timed {
+					continue
+				}
+				for i := r.i0; i < r.i1; i++ {
+					times = append(times, r.p.timeAt(i))
+				}
+			}
+			s.Times = times
+		}
+	}
+	if dt, ok := runsDt(runs); ok {
 		s.Dt = dt
 	}
 	return s, nil
 }
 
-func uniformSampleDt(dts []float64) (float64, bool) {
-	if len(dts) == 0 {
+// pieceTimes is the Times of a single kept piece: its own slice, or the
+// lazy waveform axis built now.
+func pieceTimes(p *piece) []time.Time {
+	if p.wave == nil {
+		return p.times
+	}
+	out := make([]time.Time, len(p.y))
+	for i := range out {
+		out[i] = p.timeAt(i)
+	}
+	return out
+}
+
+// runsDt is uniformSampleDt over the dt of every kept sample.
+func runsDt(runs []keptRun) (float64, bool) {
+	if len(runs) == 0 {
 		return 0, false
 	}
-	dt := dts[0]
-	for _, d := range dts[1:] {
-		if d <= 0 || math.Abs(d-dt) > 1e-9*math.Max(1, math.Abs(dt)) {
+	dt := runs[0].p.dt
+	for k, r := range runs {
+		n := r.i1 - r.i0
+		if k == 0 {
+			n-- // the first sample sets dt and is not checked
+		}
+		if n > 0 && !sameDt(r.p.dt, dt) {
 			return 0, false
 		}
 	}
 	return dt, true
 }
 
-func trimGaps(gaps *[]Gap, times []time.Time) {
+func sameDt(d, dt float64) bool {
+	return d > 0 && math.Abs(d-dt) <= 1e-9*math.Max(1, math.Abs(dt))
+}
+
+func runFiles(runs []keptRun) []string {
+	if len(runs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(runs))
+	out := make([]string, 0, len(runs))
+	for _, r := range runs {
+		if _, ok := seen[r.p.file]; ok {
+			continue
+		}
+		seen[r.p.file] = struct{}{}
+		out = append(out, r.p.file)
+	}
+	return out
+}
+
+func trimGaps(gaps *[]Gap, runs []keptRun) {
 	g := *gaps
-	for len(g) > 0 && (len(times) == 0 || g[len(g)-1].To.After(times[len(times)-1])) {
+	for len(g) > 0 && (len(runs) == 0 || g[len(g)-1].To.After(lastTime(runs))) {
 		g = g[:len(g)-1]
 	}
 	*gaps = g
-}
-
-func uniqueFiles(src []string) []string {
-	if len(src) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(src))
-	out := make([]string, 0, len(src))
-	for _, f := range src {
-		if _, ok := seen[f]; ok {
-			continue
-		}
-		seen[f] = struct{}{}
-		out = append(out, f)
-	}
-	return out
 }
 
 func overlaps(t, last time.Time, dt float64) bool {
@@ -957,6 +1046,9 @@ func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Serie
 	}
 	if s.Clock != nil {
 		s.Times, s.Clock = s.AbsoluteTimes(), nil
+	}
+	if len(s.Times) == 0 && len(s.Y) > 0 {
+		return Series{}, errWrap(ErrArgument, "resample needs sample times; the series was read WithoutTimes")
 	}
 	step, ok := roundedStep(dt)
 	if !ok || step < time.Nanosecond {

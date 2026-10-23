@@ -40,6 +40,14 @@
 // clock share the *Clock. Series.AbsoluteTimes returns []time.Time from
 // either form. Times that do not fit in int64 nanoseconds keep Times.
 //
+// WithoutTimes reads values only: Times and Clock stay nil and no time axis
+// is built or kept. A waveform's sample times are never computed. A
+// timestamp channel is still decoded where the read needs it (window,
+// monotonic check, Dt, merge across files) and then dropped. Everything else
+// in the series, and every error, is what the same read returns without the
+// option. RelativeTimes and AbsoluteTimes return nil for such a series, and
+// Resample returns ErrArgument.
+//
 // Timestamp values must be non-decreasing inside a file. A step backwards
 // returns ErrMonotonic from Read, ReadWindow, and ReadMany. Equal timestamps
 // are kept in file order. Across files they follow the overlap policy, since

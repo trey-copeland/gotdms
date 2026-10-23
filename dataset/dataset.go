@@ -147,7 +147,8 @@ type Gap struct {
 	To   time.Time
 }
 
-// Series is a merged channel read. Times is nil when Timed is false.
+// Series is a merged channel read. Times is nil when Timed is false, and
+// Times and Clock are both nil for a read that passed WithoutTimes.
 // Basis is the time RelativeTimes subtracts. Dt is the shared positive
 // increment when every contributing sample has that increment, else 0.
 type Series struct {
@@ -199,7 +200,8 @@ func (c *Clock) Len() int {
 func (c *Clock) Time(i int) time.Time { return time.Unix(0, c.Ns[i]).UTC() }
 
 // AbsoluteTimes returns the sample times of a timed series: Times, or a new
-// slice built from Clock. An untimed series returns nil.
+// slice built from Clock. An untimed series, and a timed series read
+// WithoutTimes, return nil.
 func (s Series) AbsoluteTimes() []time.Time {
 	if s.Clock == nil {
 		return s.Times
@@ -217,6 +219,10 @@ func (s Series) AbsoluteTimes() []time.Time {
 //
 // An untimed series returns the sample indexes 0, 1, 2, … as float64.
 // Basis does not apply. Timed distinguishes the two.
+//
+// A timed series read WithoutTimes has no sample times, and RelativeTimes
+// returns nil for it, not one value per sample. Check len against Y when
+// the read options are not known.
 func (s Series) RelativeTimes() []float64 {
 	return s.RelativeTimesFrom(s.Basis)
 }
@@ -225,8 +231,11 @@ func (s Series) RelativeTimes() []float64 {
 // For a timed series each value is sample_time.Sub(basis).Seconds(): zero
 // only at basis, positive after, negative before. basis need not be a sample.
 // An untimed series ignores basis and returns sample indexes, the same as
-// RelativeTimes.
+// RelativeTimes. A timed series read WithoutTimes returns nil.
 func (s Series) RelativeTimesFrom(basis time.Time) []float64 {
+	if s.Timed && s.Clock == nil && s.Times == nil && len(s.Y) > 0 {
+		return nil
+	}
 	if !s.Timed {
 		out := make([]float64, len(s.Y))
 		for i := range out {
@@ -554,6 +563,7 @@ type readOptions struct {
 	basis       time.Time
 	basisSet    bool
 	sharedClock bool
+	noTimes     bool
 }
 
 // WithReadBasis sets the basis for this call only. ReadMany applies t to
@@ -588,6 +598,21 @@ func WithSharedClock() ReadOption {
 	}
 }
 
+// WithoutTimes reads sample values only. A timed series comes back with nil
+// Times and a nil Clock, and no time axis is built for it: a waveform's
+// sample times are never computed, and a timestamp channel's axis is decoded
+// only as far as a read needs it (the window, the monotonic check, Dt, and a
+// merge across files) and is not kept. Y, Files, Timed, Source, IsTimestamp,
+// Dt, Gaps, and Basis are the same as without the option, and so are the
+// errors. Resample returns ErrArgument for such a series, and RelativeTimes,
+// RelativeTimesFrom, and AbsoluteTimes return nil (not one value per
+// sample). WithoutTimes overrides WithSharedClock.
+func WithoutTimes() ReadOption {
+	return func(o *readOptions) {
+		o.noTimes = true
+	}
+}
+
 func readConfig(opts []ReadOption) readOptions {
 	var cfg readOptions
 	for _, o := range opts {
@@ -606,12 +631,17 @@ func (d *Dataset) basisFor(opts []ReadOption) time.Time {
 	return d.basis
 }
 
-// clocks returns the per-call clock cache, or nil without WithSharedClock.
+// clocksFor returns the per-call time handling: nil without WithSharedClock
+// and WithoutTimes.
 func clocksFor(opts []ReadOption) *clockCache {
-	if !readConfig(opts).sharedClock {
-		return nil
+	cfg := readConfig(opts)
+	switch {
+	case cfg.noTimes:
+		return &clockCache{noTimes: true}
+	case cfg.sharedClock:
+		return &clockCache{byTimes: map[timesKey]*Clock{}, byWave: map[waveKey]*Clock{}}
 	}
-	return &clockCache{byTimes: map[timesKey]*Clock{}, byWave: map[waveKey]*Clock{}}
+	return nil
 }
 
 // Files returns the absolute paths that were indexed, in input order after

@@ -29,10 +29,14 @@ type waveKey struct {
 	n    int64
 }
 
-// clockCache dedupes Clocks within one Read, ReadWindow, or ReadMany call.
-// A nil cache means WithSharedClock was not passed. finish runs on one
-// goroutine, so the maps need no lock.
+// clockCache is the per-call time handling of one Read, ReadWindow, or
+// ReadMany call. A nil cache means neither WithSharedClock nor WithoutTimes
+// was passed: pieces carry Times. Otherwise waveform pieces are lazy and
+// timestamp pieces alias the decoded axis. noTimes (WithoutTimes) merges
+// without building any time axis; else the maps dedupe Clocks. finish runs
+// on one goroutine, so the maps need no lock.
 type clockCache struct {
+	noTimes bool
 	byTimes map[timesKey]*Clock
 	byWave  map[waveKey]*Clock
 }
@@ -41,7 +45,10 @@ type clockCache struct {
 // shared Clock, several pieces are merged as before and the result converted.
 func (cc *clockCache) merge(pieces []piece, policy OverlapPolicy) (Series, error) {
 	if cc == nil {
-		return mergePieces(pieces, policy)
+		return mergePieces(pieces, policy, true)
+	}
+	if cc.noTimes {
+		return mergePieces(pieces, policy, false)
 	}
 	var only *piece
 	kept := 0
@@ -70,7 +77,7 @@ func (cc *clockCache) merge(pieces []piece, policy OverlapPolicy) (Series, error
 		}
 		pieces[i].times, pieces[i].wave = times, nil
 	}
-	s, err := mergePieces(pieces, policy)
+	s, err := mergePieces(pieces, policy, true)
 	if err != nil || !s.Timed || len(s.Times) == 0 {
 		return s, err
 	}
