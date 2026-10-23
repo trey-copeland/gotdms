@@ -2,13 +2,15 @@ package tdms
 
 import (
 	"bufio"
-	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -60,6 +62,12 @@ type Writer struct {
 	own      io.Closer
 	path     string
 	bufSize  int
+
+	// syncer is w when it has a Sync method (an *os.File). durable is set
+	// by WithSync: every segment is fsynced before and after its lead-in is
+	// patched.
+	syncer  interface{ Sync() error }
+	durable bool
 
 	interleaved bool
 	closed      bool
@@ -127,19 +135,25 @@ type ChannelWriter struct {
 }
 
 // Create creates or truncates path and returns a writer. Close flushes the
-// last segment and closes the file.
-func Create(path string) (*Writer, error) {
+// last segment and closes the file. opts are the NewWriter options. With
+// WithSync, Create also syncs the parent directory once so the new file's
+// directory entry survives a power loss. That directory sync is best effort
+// and is skipped on Windows, which cannot sync a directory.
+func Create(path string, opts ...WriterOption) (*Writer, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, wrap("create", path, err)
 	}
-	w, err := NewWriter(f)
+	w, err := NewWriter(f, opts...)
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
 	w.own = f
 	w.path = path
+	if w.durable {
+		syncDir(filepath.Dir(path))
+	}
 	return w, nil
 }
 
@@ -168,6 +182,15 @@ func NewWriter(w io.Writer, opts ...WriterOption) (*Writer, error) {
 		root:      &wObj{path: "/"},
 		gindex:    map[string]*wGroup{},
 		prevIndex: map[string]wIndex{},
+	}
+	if s, ok := w.(interface{ Sync() error }); ok {
+		wr.syncer = s
+	}
+	if cfg.sync {
+		if wr.syncer == nil {
+			return nil, wrap("write", "", fmt.Errorf("%w: WithSync needs a writer with a Sync method, such as *os.File", ErrArgument))
+		}
+		wr.durable = true
 	}
 	if ws, ok := w.(io.WriteSeeker); ok {
 		pos, err := ws.Seek(0, io.SeekCurrent)
@@ -407,6 +430,83 @@ func (w *Writer) Flush() error {
 	return nil
 }
 
+// Sync writes the pending segment (as Flush does) and then, when the
+// underlying writer has a Sync method, asks the operating system to commit
+// everything written so far to stable storage. During an open Stream it
+// commits the values streamed so far without finishing the segment. On a
+// seekable writer the lead-in still holds the incomplete-segment sentinel,
+// so a reader keeps those values; on a non-seekable writer the lead-in
+// already names the declared length, so the synced prefix reads as
+// ErrTruncated until the stream finishes. A writer without Sync (a
+// bytes.Buffer, a pipe wrapper) is only flushed.
+//
+// A failed sync leaves the writer unusable, because the operating system
+// may already have dropped the unsynced pages. The exception is a file that
+// does not support fsync at all (EINVAL or ENOTSUP, such as an *os.File
+// that is a pipe on Unix): nothing was dropped, so Sync returns the error
+// and the writer stays usable. Do not call Sync on a pipe on Windows, where
+// it waits until the reader has drained the pipe.
+func (w *Writer) Sync() error {
+	if w == nil {
+		return wrap("sync", "", fmt.Errorf("%w: nil writer", ErrArgument))
+	}
+	if w.closed {
+		return wrap("sync", w.path, ErrClosed)
+	}
+	if w.sticky != nil {
+		return wrap("sync", w.path, w.sticky)
+	}
+	if w.stream != nil {
+		if err := w.bw.Flush(); err != nil {
+			return wrap("sync", w.path, err)
+		}
+	} else {
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		if w.durable {
+			// WithSync already synced every segment Flush wrote, after its
+			// lead-in patch, so there is nothing left to commit.
+			return nil
+		}
+	}
+	if w.syncer == nil {
+		return nil
+	}
+	if err := w.syncer.Sync(); err != nil {
+		if !syncUnsupported(err) && w.sticky == nil {
+			w.sticky = err
+		}
+		return wrap("sync", w.path, err)
+	}
+	return nil
+}
+
+// syncUnsupported reports an fsync the file type does not support. No data
+// was dropped, so an explicit Writer.Sync does not poison the writer.
+func syncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP)
+}
+
+// syncNow fsyncs the underlying writer. A failure is sticky.
+func (w *Writer) syncNow() error {
+	if err := w.syncer.Sync(); err != nil {
+		if w.sticky == nil {
+			w.sticky = err
+		}
+		return err
+	}
+	return nil
+}
+
+// syncDurable fsyncs only when WithSync was given.
+func (w *Writer) syncDurable() error {
+	if !w.durable {
+		return nil
+	}
+	return w.syncNow()
+}
+
 // Close flushes pending data and, when Create was used, closes the file.
 // An empty writer still produces a valid one-segment file that contains the
 // root object.
@@ -479,20 +579,17 @@ func (w *Writer) writeSegment(toc uint32, meta []byte, data []*wChannel, rawSize
 		if err := w.bw.Flush(); err != nil {
 			return err
 		}
-		if _, err := w.ws.Seek(w.pos+12, io.SeekStart); err != nil {
+		// With WithSync the raw bytes are on stable storage before the
+		// lead-in names them, and the patched length is synced before the
+		// next segment starts. Without it a power loss can persist the patch
+		// before the data.
+		if err := w.syncDurable(); err != nil {
 			return err
 		}
-		var next [8]byte
-		binary.LittleEndian.PutUint64(next[:], rawLen)
-		if _, err := w.ws.Write(next[:]); err != nil {
+		if err := w.patchNext(w.pos, rawLen); err != nil {
 			return err
 		}
-		end := w.pos + int64(leadInSize) + int64(len(meta)) + rawSize
-		if _, err := w.ws.Seek(end, io.SeekStart); err != nil {
-			return err
-		}
-		w.pos = end
-		return nil
+		return w.syncDurable()
 	}
 	lead := encodeLeadIn(toc, rawLen, uint64(len(meta)))
 	if _, err := w.bw.Write(lead); err != nil {
@@ -508,7 +605,7 @@ func (w *Writer) writeSegment(toc uint32, meta []byte, data []*wChannel, rawSize
 		return err
 	}
 	w.pos += int64(leadInSize) + int64(len(meta)) + rawSize
-	return nil
+	return w.syncDurable()
 }
 
 func (w *Writer) dataChannels() []*wChannel {

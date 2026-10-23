@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 )
 
@@ -1335,6 +1336,10 @@ func isUnsupportedChmod(err error) bool {
 // directory. It is best effort: a failure leaves a valid sidecar that may
 // not survive a crash, and Open treats a missing sidecar as a miss.
 func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		// Windows cannot flush a directory handle; the call would only fail.
+		return
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return

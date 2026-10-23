@@ -139,10 +139,43 @@ func applyReaderOptions(opts []ReaderOption) readerConfig {
 
 type writerConfig struct {
 	bufSize int
+	sync    bool
 }
 
 // WriterOption configures NewWriter.
 type WriterOption func(*writerConfig)
+
+// WithSync makes each segment durable before the writer moves on. For a
+// seekable writer the order is: write the lead-in with the incomplete-segment
+// sentinel, the metadata, and the raw bytes; fsync; patch the lead-in with
+// the real length; fsync again. A power loss then leaves either the sentinel
+// (the reader keeps the whole values that reached disk) or a lead-in whose
+// length covers bytes that are already on disk. A non-seekable writer is
+// fsynced after each segment. Stream.Finish follows the same order.
+//
+// The guarantee is per synced segment. A power loss while a later segment
+// is being written can leave a torn tail after the last synced segment: a
+// partial lead-in, zero-filled blocks, or metadata cut short. Open and
+// WithLenientTail return ErrTruncated or ErrBadTag for such a file; the
+// synced segments are intact on disk, and truncating the file at the end
+// of the last whole segment recovers them.
+//
+// Without WithSync the writer never fsyncs. A process crash still leaves a
+// readable file, because the kernel has the bytes, but a power loss or OS
+// crash may persist the patched lead-in before the raw bytes it names.
+//
+// WithSync needs a writer with a Sync method, such as *os.File; NewWriter
+// returns ErrArgument otherwise. The file must support fsync: an *os.File
+// that is a pipe or terminal fails its first sync, and the writer then
+// stops. Create with WithSync also syncs the parent
+// directory once (best effort, skipped on Windows). Each fsync costs a
+// device flush, so prefer fewer, larger segments. Writer.Sync is the
+// explicit commit point with or without this option.
+func WithSync() WriterOption {
+	return func(c *writerConfig) {
+		c.sync = true
+	}
+}
 
 // WithWriteBuffer sets the buffered writer size. A non-positive size selects
 // DefaultWriteBuffer. The lead-in of a seekable writer is still patched with

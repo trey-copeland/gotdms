@@ -326,9 +326,15 @@ func (s *Stream) shutdown() error {
 	if err := s.w.bw.Flush(); err != nil {
 		return s.abandon(err)
 	}
+	if err := s.w.syncDurable(); err != nil {
+		return s.abandon(err)
+	}
 	if s.w.seekable {
 		next := uint64(s.metaLen) + uint64(s.rawExpect)
 		if err := s.w.patchNext(s.segStart, next); err != nil {
+			return s.abandon(err)
+		}
+		if err := s.w.syncDurable(); err != nil {
 			return s.abandon(err)
 		}
 	} else {
