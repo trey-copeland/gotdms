@@ -570,8 +570,22 @@ func readFloatSpan(ch *tdms.Channel, i0, i1 int64) ([]float64, error) {
 	if err != nil {
 		return nil, err
 	}
-	// CursorAt seeks to sample s0. The prefix is not decoded.
 	n := s1 - s0
+	if dt := ch.DataType(); dt == tdms.TypeFloat64 || dt == tdms.TypeFloat64WithUnit {
+		// Slice reads the span into a new slice, which is already the
+		// result. A one-batch cursor would decode into its batch and then
+		// copy it: two buffers of the span at once.
+		v, err := ch.Slice(s0, n)
+		if err != nil {
+			return nil, err
+		}
+		out, ok := v.([]float64)
+		if !ok || len(out) != n {
+			return nil, fmt.Errorf("%w: read %d samples, want %d", ErrArgument, sliceLen(v), n)
+		}
+		return out, nil
+	}
+	// CursorAt seeks to sample s0. The prefix is not decoded.
 	cur := ch.CursorAt(s0, n, n)
 	defer cur.Close()
 	if !cur.Next() {
