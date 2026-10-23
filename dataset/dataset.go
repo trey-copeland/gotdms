@@ -165,6 +165,11 @@ type Series struct {
 	// allocate a new vector on every call.
 	Y     []float64
 	Times []time.Time
+	// Clock is set instead of Times when the read passed WithSharedClock and
+	// every sample time fits in int64 Unix nanoseconds. Series from one call
+	// that were read from the same clock point to the same *Clock, so the
+	// pointer identifies the time axis. Clock is shared and read-only.
+	Clock *Clock
 	Gaps  []Gap
 	// Basis is the anchor for RelativeTimes: sample time minus Basis, in
 	// seconds. It is the dataset basis, or the WithReadBasis value for the
@@ -172,6 +177,38 @@ type Series struct {
 	// series or of the window. Resample copies it. RelativeTimesFrom does
 	// not change it.
 	Basis time.Time
+}
+
+// Clock is an absolute time axis stored as Unix nanoseconds, 8 bytes per
+// sample instead of the 24 of a time.Time. WithSharedClock returns one Clock
+// per distinct clock read in a call and hands the same pointer to every
+// Series that uses it. Ns must not be modified.
+type Clock struct {
+	Ns []int64
+}
+
+// Len is the number of samples.
+func (c *Clock) Len() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.Ns)
+}
+
+// Time returns sample i as a UTC time.Time.
+func (c *Clock) Time(i int) time.Time { return time.Unix(0, c.Ns[i]).UTC() }
+
+// AbsoluteTimes returns the sample times of a timed series: Times, or a new
+// slice built from Clock. An untimed series returns nil.
+func (s Series) AbsoluteTimes() []time.Time {
+	if s.Clock == nil {
+		return s.Times
+	}
+	out := make([]time.Time, len(s.Clock.Ns))
+	for i, ns := range s.Clock.Ns {
+		out[i] = time.Unix(0, ns).UTC()
+	}
+	return out
 }
 
 // RelativeTimes returns seconds since Basis for a timed series.
@@ -194,6 +231,13 @@ func (s Series) RelativeTimesFrom(basis time.Time) []float64 {
 		out := make([]float64, len(s.Y))
 		for i := range out {
 			out[i] = float64(i)
+		}
+		return out
+	}
+	if s.Clock != nil {
+		out := make([]float64, len(s.Clock.Ns))
+		for i, ns := range s.Clock.Ns {
+			out[i] = time.Unix(0, ns).Sub(basis).Seconds()
 		}
 		return out
 	}
@@ -485,8 +529,9 @@ func (d *Dataset) Basis() time.Time { return d.basis }
 type ReadOption func(*readOptions)
 
 type readOptions struct {
-	basis    time.Time
-	basisSet bool
+	basis       time.Time
+	basisSet    bool
+	sharedClock bool
 }
 
 // WithReadBasis sets the basis for this call only. ReadMany applies t to
@@ -501,17 +546,50 @@ func WithReadBasis(t time.Time) ReadOption {
 	}
 }
 
-func (d *Dataset) basisFor(opts []ReadOption) time.Time {
+// WithSharedClock returns each timed series' sample times as a Clock of
+// Unix nanoseconds instead of Times. Series in one call that come from the
+// same clock share one *Clock: channels of a group read against one
+// timestamp channel, and waveform channels with the same wf_start_time,
+// wf_increment, and sample range, in one file or several. That cuts the time axis
+// from 24 bytes per sample per channel to 8 bytes per sample per clock.
+//
+// The values are the same instants: Clock.Ns[i] is Times[i].UnixNano(), and
+// RelativeTimes returns the same float64 values. Clock.Time and
+// AbsoluteTimes return them in UTC. A series whose times do not
+// fit in int64 nanoseconds (before 1678 or after 2262) keeps Times and has a
+// nil Clock. A series merged from several files gets its own Clock. Gaps,
+// Dt, Y, and Basis are unchanged. Resample accepts a Clock series and
+// returns Times.
+func WithSharedClock() ReadOption {
+	return func(o *readOptions) {
+		o.sharedClock = true
+	}
+}
+
+func readConfig(opts []ReadOption) readOptions {
 	var cfg readOptions
 	for _, o := range opts {
 		if o != nil {
 			o(&cfg)
 		}
 	}
+	return cfg
+}
+
+func (d *Dataset) basisFor(opts []ReadOption) time.Time {
+	cfg := readConfig(opts)
 	if cfg.basisSet {
 		return cfg.basis
 	}
 	return d.basis
+}
+
+// clocks returns the per-call clock cache, or nil without WithSharedClock.
+func clocksFor(opts []ReadOption) *clockCache {
+	if !readConfig(opts).sharedClock {
+		return nil
+	}
+	return &clockCache{byTimes: map[timesKey]*Clock{}, byWave: map[waveKey]*Clock{}}
 }
 
 // Files returns the absolute paths that were indexed, in input order after
@@ -573,7 +651,7 @@ func (d *Dataset) Match(pattern string) ([]Occurrence, error) {
 // Untimed channels are concatenated in file-path order. opts may include
 // WithReadBasis; the dataset basis is used otherwise.
 func (d *Dataset) Read(sel Selector, opts ...ReadOption) (Series, error) {
-	return d.read(sel, time.Time{}, time.Time{}, false, d.basisFor(opts))
+	return d.read(sel, time.Time{}, time.Time{}, false, d.basisFor(opts), clocksFor(opts))
 }
 
 // ReadWindow merges the channel and keeps samples with start <= t < end.
@@ -584,7 +662,7 @@ func (d *Dataset) ReadWindow(sel Selector, start, end time.Time, opts ...ReadOpt
 	if !end.After(start) {
 		return Series{}, fmt.Errorf("%w: window end must be after start", ErrArgument)
 	}
-	return d.read(sel, start, end, true, d.basisFor(opts))
+	return d.read(sel, start, end, true, d.basisFor(opts), clocksFor(opts))
 }
 
 // ReadMany reads each selector over the same half-open window [start, end).
@@ -599,10 +677,10 @@ func (d *Dataset) ReadMany(sels []Selector, start, end time.Time, opts ...ReadOp
 	if !end.After(start) {
 		return nil, fmt.Errorf("%w: window end must be after start", ErrArgument)
 	}
-	return d.readShared(sels, start, end, d.basisFor(opts))
+	return d.readShared(sels, start, end, d.basisFor(opts), clocksFor(opts))
 }
 
-func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis time.Time) (Series, error) {
+func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis time.Time, cc *clockCache) (Series, error) {
 	hits, err := d.resolve(sel)
 	if err != nil {
 		return Series{}, err
@@ -628,14 +706,14 @@ func (d *Dataset) read(sel Selector, start, end time.Time, window bool, basis ti
 	pieces := make([]piece, len(jobs))
 	errs := make([]error, len(jobs))
 	run(d.opt.readWorkers, len(jobs), func(i int) {
-		pieces[i], errs[i] = readOccurrence(jobs[i].o, d.opt, start, end, window)
+		pieces[i], errs[i] = readOccurrence(jobs[i].o, d.opt, start, end, window, cc != nil)
 	})
 	for i, err := range errs {
 		if err != nil {
 			return Series{}, fmt.Errorf("dataset: read %s %q/%q: %w", jobs[i].o.File, jobs[i].o.Group, jobs[i].o.Name, err)
 		}
 	}
-	return d.finish(sel, hits, pieces, basis)
+	return d.finish(sel, hits, pieces, basis, cc)
 }
 
 func validateWindow(hits []Occurrence, window bool) error {
@@ -650,7 +728,7 @@ func validateWindow(hits []Occurrence, window bool) error {
 	return nil
 }
 
-func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis time.Time) (Series, error) {
+func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis time.Time, cc *clockCache) (Series, error) {
 	sort.Slice(pieces, func(i, j int) bool {
 		if !pieces[i].start.Equal(pieces[j].start) {
 			if pieces[i].timed != pieces[j].timed {
@@ -660,7 +738,7 @@ func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis 
 		}
 		return pieces[i].file < pieces[j].file
 	})
-	merged, err := mergePieces(pieces, d.opt.overlap)
+	merged, err := cc.merge(pieces, d.opt.overlap)
 	if err != nil {
 		return Series{}, err
 	}
@@ -678,6 +756,7 @@ func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis 
 	}
 	if !merged.Timed {
 		merged.Times = nil
+		merged.Clock = nil
 		merged.Dt = 0
 		merged.Gaps = nil
 	}

@@ -35,6 +35,11 @@
 // uses it. RelativeTimesFrom computes against any other time without changing
 // the series. An untimed series ignores the basis and returns sample indexes.
 //
+// WithSharedClock returns each timed series' times as a Clock of int64 Unix
+// nanoseconds instead of Times, and series of one call read from the same
+// clock share the *Clock. Series.AbsoluteTimes returns []time.Time from
+// either form. Times that do not fit in int64 nanoseconds keep Times.
+//
 // Timestamp values must be non-decreasing inside a file. A step backwards
 // returns ErrMonotonic from Read, ReadWindow, and ReadMany. Equal timestamps
 // are kept in file order. Across files they follow the overlap policy, since

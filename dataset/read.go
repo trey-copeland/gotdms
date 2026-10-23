@@ -22,9 +22,14 @@ type piece struct {
 	y     []float64
 	times []time.Time
 	timed bool
+	// wave describes a waveform axis whose times were not built, only with
+	// WithSharedClock. clockCache.merge builds a Clock from it, or Times when
+	// the piece is merged with others.
+	wave   *waveKey
+	waveT0 time.Time
 }
 
-func readOccurrence(o Occurrence, opt options, start, end time.Time, window bool) (piece, error) {
+func readOccurrence(o Occurrence, opt options, start, end time.Time, window, lazyWave bool) (piece, error) {
 	f, err := openTDMS(o.File, opt.segIndex, opt.segTrust)
 	if err != nil {
 		return piece{}, err
@@ -49,7 +54,7 @@ func readOccurrence(o Occurrence, opt options, start, end time.Time, window bool
 	}
 	switch o.Source {
 	case TimeWaveform:
-		return readWaveform(ch, o, start, end, window)
+		return readWaveform(ch, o, start, end, window, lazyWave)
 	case TimeTimestamp:
 		return readTimestampAxis(g, ch, o, opt, start, end, window)
 	default:
@@ -57,7 +62,7 @@ func readOccurrence(o Occurrence, opt options, start, end time.Time, window bool
 	}
 }
 
-func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window bool) (piece, error) {
+func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window, lazy bool) (piece, error) {
 	t0, ok := ch.StartTime()
 	if !ok {
 		return piece{}, ErrArgument
@@ -85,6 +90,17 @@ func readWaveform(ch *tdms.Channel, o Occurrence, start, end time.Time, window b
 	y, err := readFloatSpan(ch, i0, i1)
 	if err != nil {
 		return piece{}, err
+	}
+	if lazy && len(y) > 0 {
+		first, err := waveformAt(t0, inc, i0)
+		if err != nil {
+			return piece{}, err
+		}
+		p.y = y
+		p.start = first
+		p.wave = &waveKey{sec: t0.Unix(), nsec: t0.Nanosecond(), inc: math.Float64bits(inc), i0: i0, n: int64(len(y))}
+		p.waveT0 = t0
+		return p, nil
 	}
 	times := make([]time.Time, len(y))
 	for i := range times {
@@ -318,7 +334,7 @@ type clockRead struct {
 	tsUsers    int
 }
 
-func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.Time) ([]Series, error) {
+func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.Time, cc *clockCache) ([]Series, error) {
 	type plan struct {
 		hits  []Occurrence
 		slots []int
@@ -371,7 +387,7 @@ func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.T
 			id := len(slots)
 			slots = append(slots, readSlot{})
 			plans[i].slots[hi] = id
-			items = append(items, readItem{slot: id, o: o, fr: fr})
+			items = append(items, readItem{slot: id, o: o, fr: fr, shareClock: cc != nil})
 		}
 	}
 	for _, it := range items {
@@ -393,7 +409,7 @@ func (d *Dataset) readShared(sels []Selector, start, end time.Time, basis time.T
 			}
 			pieces = append(pieces, slots[id].piece)
 		}
-		merged, err := d.finish(sel, plans[i].hits, pieces, basis)
+		merged, err := d.finish(sel, plans[i].hits, pieces, basis, cc)
 		if err != nil {
 			return nil, err
 		}
@@ -406,6 +422,9 @@ type readItem struct {
 	slot int
 	o    Occurrence
 	fr   *fileRead
+	// shareClock is WithSharedClock: waveform pieces skip building Times and
+	// timestamp pieces alias the file's decoded clock instead of copying it.
+	shareClock bool
 }
 
 func (it readItem) run(slots []readSlot, opt options, start, end time.Time) {
@@ -415,7 +434,7 @@ func (it readItem) run(slots []readSlot, opt options, start, end time.Time) {
 		slots[it.slot].err = it.fr.err
 		return
 	}
-	p, err := readItemPiece(it.fr, it.o, opt, start, end)
+	p, err := readItemPiece(it.fr, it.o, opt, start, end, it.shareClock)
 	slots[it.slot].piece = p
 	slots[it.slot].err = err
 }
@@ -432,7 +451,7 @@ func (fr *fileRead) done() {
 	}
 }
 
-func readItemPiece(fr *fileRead, o Occurrence, opt options, start, end time.Time) (piece, error) {
+func readItemPiece(fr *fileRead, o Occurrence, opt options, start, end time.Time, shareClock bool) (piece, error) {
 	g, ok := fr.f.Group(o.Group)
 	if !ok {
 		return piece{}, ErrNotFound
@@ -443,15 +462,15 @@ func readItemPiece(fr *fileRead, o Occurrence, opt options, start, end time.Time
 	}
 	switch o.Source {
 	case TimeWaveform:
-		return readWaveform(ch, o, start, end, true)
+		return readWaveform(ch, o, start, end, true, shareClock)
 	case TimeTimestamp:
-		return readSharedTimestamp(fr, g, ch, o, opt, start, end)
+		return readSharedTimestamp(fr, g, ch, o, opt, start, end, shareClock)
 	default:
 		return piece{}, ErrUntimed
 	}
 }
 
-func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurrence, opt options, start, end time.Time) (piece, error) {
+func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurrence, opt options, start, end time.Time, shareClock bool) (piece, error) {
 	name := o.Timestamp
 	if o.IsTimestamp {
 		name = o.Name
@@ -524,7 +543,13 @@ func readSharedTimestamp(fr *fileRead, g *tdms.Group, ch *tdms.Channel, o Occurr
 		dt:    ck.dt,
 		timed: true,
 		y:     clipFloat(y, ck.i0, ck.i1, o.IsTimestamp && ck.tsUsers > 1),
-		times: clipTime(ck.times, ck.i0, ck.i1, ck.users > 1),
+		times: clipTime(ck.times, ck.i0, ck.i1, ck.users > 1 && !shareClock),
+	}
+	if shareClock && ck.i1 > ck.i0 && ck.i1 <= len(ck.times) {
+		// Every user of this clock gets the same backing array, so
+		// clockCache.merge converts it once and shares the Clock. The slice is
+		// never written; merge copies it if it cannot become a Clock.
+		p.times = ck.times[ck.i0:ck.i1:ck.i1]
 	}
 	if len(p.times) > 0 {
 		p.start = p.times[0]
@@ -916,6 +941,9 @@ func (s Series) Resample(start, end time.Time, dt float64, method Interp) (Serie
 	}
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return Series{}, errWrap(ErrArgument, "resample dt")
+	}
+	if s.Clock != nil {
+		s.Times, s.Clock = s.AbsoluteTimes(), nil
 	}
 	step, ok := roundedStep(dt)
 	if !ok || step < time.Nanosecond {
