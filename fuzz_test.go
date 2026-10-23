@@ -146,33 +146,52 @@ func FuzzSegmentIndex(f *testing.F) {
 		f.Add(dblob)
 	}
 
+	// The data file and the sidecar path are created once per fuzz worker.
+	// Iterations run one at a time in a worker, so they can share them. The
+	// data file never changes, so its size, mtime, and inode stay fixed and a
+	// crafted sidecar can be a stable hit. withoutSegmentIndexWrite keeps a
+	// miss from rewriting the sidecar (temp file, fsync, rename, directory
+	// sync) on every iteration; Open reads the sidecar the same way as in
+	// production.
+	path = filepath.Join(dir, "f.tdms")
+	w, err = Create(path)
+	if err != nil {
+		f.Fatal(err)
+	}
+	ch, err = w.Group("g").Channel("c", TypeInt32)
+	if err != nil {
+		f.Fatal(err)
+	}
+	if err := ch.Write([]int32{7, 8, 9}); err != nil {
+		f.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		f.Fatal(err)
+	}
+	// A valid sidecar for this exact file, so the seed corpus includes a hit.
+	fixedSide := filepath.Join(dir, "fixed.gtdx")
+	fx, err := Open(path, WithSegmentIndex(fixedSide))
+	if err != nil {
+		f.Fatal(err)
+	}
+	fx.Close()
+	fixedBlob, err := os.ReadFile(fixedSide)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(fixedBlob)
+	side = filepath.Join(dir, "crafted.gtdx")
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > 1<<16 {
 			data = data[:1<<16]
 		}
 		_, _ = decodeSegmentIndex(data)
 
-		dir := t.TempDir()
-		path := filepath.Join(dir, "f.tdms")
-		w, err := Create(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ch, err := w.Group("g").Channel("c", TypeInt32)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := ch.Write([]int32{7, 8, 9}); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-		side := filepath.Join(dir, "crafted.gtdx")
 		if err := os.WriteFile(side, data, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		got, err := Open(path, WithSegmentIndex(side))
+		got, err := Open(path, WithSegmentIndex(side), withoutSegmentIndexWrite())
 		if err != nil {
 			t.Fatalf("sidecar must not fail the open: %v", err)
 		}

@@ -14,6 +14,11 @@ type readerConfig struct {
 	indexSidecar       string
 	indexTrustIdentity bool
 	lenientTail        bool
+	// indexNoWrite keeps Open from replacing the sidecar after a miss. It is
+	// set only by withoutSegmentIndexWrite in options_test.go, so it exists
+	// only in test builds; fuzz tests use it so each iteration does not pay
+	// for a durable rewrite. Production code never sets it.
+	indexNoWrite bool
 }
 
 // ReaderOption configures NewReader.

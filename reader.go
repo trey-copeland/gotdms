@@ -206,7 +206,7 @@ func newReader(r io.ReaderAt, path string, opts ...ReaderOption) (*File, error) 
 	if err := f.parse(); err != nil {
 		return nil, err
 	}
-	if cfg.indexSidecar != "" {
+	if cfg.indexSidecar != "" && !cfg.indexNoWrite {
 		// A cache write failure leaves the open valid. The next open parses.
 		_ = f.writeSegmentIndex(cfg.indexSidecar, pre)
 	}
@@ -1202,10 +1202,14 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 	return unused, nil
 }
 
+// mustMul is a*b for products the caller has already bounded, such as a
+// chunk index times a chunk size inside a validated raw-data length. An
+// overflow there is a bug in this package, not a bad file, so it panics
+// instead of returning a value that would address the wrong bytes.
 func mustMul(a, b int64) int64 {
 	v, err := mul64(a, b)
 	if err != nil {
-		return 0
+		panic(fmt.Sprintf("tdms: internal error: %d * %d overflows int64", a, b))
 	}
 	return v
 }

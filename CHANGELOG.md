@@ -4,6 +4,9 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
+- The internal `mustMul` helper panics on int64 overflow instead of returning 0. Every caller passes a product that earlier checks already bound to the raw-data length, so no file reaches it; a 0 would have addressed the wrong bytes without an error.
+- `FuzzSegmentIndex` creates its data file once per worker instead of once per input, seeds a sidecar that is a hit for that file, and skips the sidecar rewrite after a miss through an unexported test-only option. Exported `Open` behavior is unchanged: a miss still replaces the sidecar atomically with fsync. Local throughput went from about 1.5k to about 14.5k executions per second (median of three 15-second runs).
+
 ## v0.1.2 (2026-10-23)
 
 `v0.1.2` is the changes since `v0.1.1` (`7d514a7`). The release-workflow checkout and the module-cache test skip landed in `e2bd37c` ([#18](https://github.com/trey-copeland/gotdms/pull/18)). The metadata-gap fix for NI HSAI DAQmx captures landed in `53fa09e` ([#19](https://github.com/trey-copeland/gotdms/pull/19)).
