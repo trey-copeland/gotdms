@@ -11,7 +11,7 @@ go run ./cmd/gotdms convert -o run.csv run.tdms
 go run ./cmd/gotdms convert --group acquisition --channel temperature -o temp.csv run.tdms
 ```
 
-`go install github.com/trey-copeland/gotdms/cmd/gotdms@latest` builds the latest tagged release into `$(go env GOPATH)/bin` (or `GOBIN` when set); put that directory on `PATH`. Flags added since that tag (see the Unreleased section of [CHANGELOG.md](../CHANGELOG.md), such as `info --lenient`) need a checkout until the next tag. `gotdms help` prints the usage.
+`go install github.com/trey-copeland/gotdms/cmd/gotdms@latest` builds the latest tagged release, `v0.2.0`, into `$(go env GOPATH)/bin` (or `GOBIN` when set); put that directory on `PATH`. Flags added after that tag are listed under Unreleased in [CHANGELOG.md](../CHANGELOG.md) and need a checkout until the next tag. `gotdms help` prints the usage.
 
 ## info and convert
 

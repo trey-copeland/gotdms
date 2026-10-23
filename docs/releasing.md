@@ -2,7 +2,7 @@
 
 A Go library is distributed by a version tag. The module proxy (`proxy.golang.org`) fetches the tag from GitHub. This repository does not publish binaries for the library.
 
-`v0.1.2` (2026-10-23) is the latest tag. Earlier tags: `v0.1.1` at `7d514a7` and `v0.1.0` at `622cb34`. Each version uses the same `vX.Y.Z` steps. [CHANGELOG.md](../CHANGELOG.md) holds the notes: an empty `Unreleased` heading, then one `vX.Y.Z` section per release. The Python package is [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python). It was extracted from this repository on 2026-10-19 and is not on PyPI. This checklist does not publish it.
+`v0.2.0` (2026-10-23) is the latest tag, at the release-notes commit. Earlier tags: `v0.1.2` at `8d2f134`, `v0.1.1` at `7d514a7`, and `v0.1.0` at `622cb34`. Each version uses the same `vX.Y.Z` steps. [CHANGELOG.md](../CHANGELOG.md) holds the notes: an empty `Unreleased` heading, then one `vX.Y.Z` section per release. The Python package is [github.com/trey-copeland/gotdms-python](https://github.com/trey-copeland/gotdms-python). It was extracted from this repository on 2026-10-19 and is not on PyPI. This checklist does not publish it.
 
 `.github/workflows/build-and-test-go-module.yml` is on `main`. This checklist requires that workflow to be green for the commit you tag, including the `differential test against npTDMS` job. That job installs npTDMS 1.13.0 (LGPL-3.0-only) with pip as a CI-only oracle. It is not a Go dependency and is not shipped. This document does not add a second copy of that workflow. `.github/workflows/test-and-publish-go-release.yml` is also on `main`. It runs only when a `v*` tag is pushed, re-checks this module, and opens a GitHub Release. It does not build binaries, it does not publish to PyPI, and it does not talk to the module proxy.
 
@@ -67,7 +67,7 @@ go get github.com/trey-copeland/gotdms@vX.Y.Z
 
 `go get` must select `vX.Y.Z`. A short program that imports `github.com/trey-copeland/gotdms` and calls `tdms.Create` on a `bytes.Buffer` must compile. The dataset package is `github.com/trey-copeland/gotdms/dataset` in the same module. The Python package is not part of this module.
 
-`v0.1.2` is the latest tag on the repository. The same proxy URL with that version in place of `vX.Y.Z` is the check for it; earlier tags are checked the same way. Each new tag gets the same check.
+`v0.2.0` is the latest tag on the repository. The same proxy URL with that version in place of `vX.Y.Z` is the check for it; earlier tags are checked the same way. Each new tag gets the same check.
 
 pkg.go.dev (`https://pkg.go.dev/github.com/trey-copeland/gotdms@vX.Y.Z`) should show the package comment from `doc.go` and `Example_roundTrip`. The site lags the proxy. The README at the repository root is the page it renders above the package index.
 
