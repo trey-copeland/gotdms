@@ -446,6 +446,12 @@ func TestSegmentIndexAdversarialLengths(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(blob[spanAt+48:]); got != 4 {
 		t.Fatalf("typeSize = %d", got)
 	}
+	if got := int64(binary.LittleEndian.Uint64(blob[spanAt+8:])); got != 12 {
+		t.Fatalf("chunkSize = %d", got)
+	}
+	if got := int64(binary.LittleEndian.Uint64(blob[spanAt+40:])); got != 4 {
+		t.Fatalf("stride = %d", got)
+	}
 
 	patch := func(edit func([]byte)) {
 		t.Helper()
@@ -485,6 +491,18 @@ func TestSegmentIndexAdversarialLengths(t *testing.T) {
 		n := int64(1) << 60
 		binary.LittleEndian.PutUint64(b[spanAt+24:], uint64(n))
 		binary.LittleEndian.PutUint64(b[len(b)-8:], uint64(n))
+	})
+	patch(func(b []byte) {
+		// Stride that walks a sample past the 12-byte chunk: col 0, stride 8,
+		// 3 samples reaches byte 20. The sample count and total still agree, so
+		// the length checks pass; only the intra-chunk walk catches it. Without
+		// that check the read addresses the next chunk or runs past EOF.
+		binary.LittleEndian.PutUint64(b[spanAt+40:], 8)
+	})
+	patch(func(b []byte) {
+		// An out-of-range stride that stays within the file byte budget
+		// (samples*typeSize) but blows past the chunk.
+		binary.LittleEndian.PutUint64(b[spanAt+40:], uint64(1)<<40)
 	})
 }
 

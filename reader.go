@@ -1023,7 +1023,7 @@ func (d *decoder) rawHeader() (int, []byte, *daqmxSpec, error) {
 
 func parseFullIndex(body []byte, bo binary.ByteOrder) (DataType, int64, int64, error) {
 	if len(body) < 16 {
-		return 0, 0, 0, fmt.Errorf("%w: raw-data index shorter than 20 bytes", ErrCorrupt)
+		return 0, 0, 0, fmt.Errorf("%w: raw-data index shorter than 16 bytes", ErrCorrupt)
 	}
 	d := decoder{b: body, bo: bo}
 	code, err := d.u32()
