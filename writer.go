@@ -418,6 +418,15 @@ func (w *Writer) Flush() error {
 		}
 	}
 	if err := w.writeSegment(toc, meta, data, rawSize); err != nil {
+		// A segment write can fail after bytes have reached the underlying
+		// writer (a patchNext seek, or the final buffer flush) with w.pos still
+		// at the segment start and the channel data not reset. Poison the
+		// writer so a later Flush or Close does not append a second copy and
+		// corrupt the file. The sync path already sets sticky; this covers the
+		// non-sync path and any pre-sync failure.
+		if w.sticky == nil {
+			w.sticky = err
+		}
 		return wrap("flush", w.path, err)
 	}
 	w.started = true
@@ -511,6 +520,9 @@ func (w *Writer) syncDurable() error {
 // An empty writer still produces a valid one-segment file that contains the
 // root object.
 func (w *Writer) Close() error {
+	if w == nil {
+		return wrap("close", "", fmt.Errorf("%w: nil writer", ErrArgument))
+	}
 	if w.closed {
 		return nil
 	}
