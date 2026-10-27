@@ -708,8 +708,11 @@ func (d *Dataset) Read(sel Selector, opts ...ReadOption) (Series, error) {
 
 // ReadWindow merges the channel and keeps samples with start <= t < end.
 // Untimed channels return ErrUntimed. Files whose span misses the window are
-// not opened. A timestamp axis that steps backwards returns ErrMonotonic.
-// The basis is not moved to the first sample inside the window.
+// not opened. A backwards step among the samples this read decodes returns
+// ErrMonotonic; a window served from the catalog's uniform step decodes only
+// the samples inside the window, so a backwards step lying entirely outside
+// the window may not be reported. A full Read decodes the whole axis and
+// catches it. The basis is not moved to the first sample inside the window.
 func (d *Dataset) ReadWindow(sel Selector, start, end time.Time, opts ...ReadOption) (Series, error) {
 	if !end.After(start) {
 		return Series{}, fmt.Errorf("%w: window end must be after start", ErrArgument)

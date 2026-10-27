@@ -75,9 +75,11 @@
 // option. RelativeTimes and AbsoluteTimes return nil for such a series, and
 // Resample returns ErrArgument.
 //
-// Timestamp values must be non-decreasing inside a file. A step backwards
-// returns ErrMonotonic from Read, ReadWindow, and ReadMany. Equal timestamps
-// are kept in file order. Across files they follow the overlap policy, since
+// Timestamp values must be non-decreasing inside a file. Read decodes the
+// whole axis and returns ErrMonotonic on any backwards step. ReadWindow and
+// ReadMany decode only the samples the window needs (see Reads and memory),
+// so a backwards step lying entirely outside the window may not be reported.
+// Equal timestamps are kept in file order. Across files they follow the overlap policy, since
 // a repeated time is not a positive increment. Gaps are recorded only when the
 // previous file has a positive Dt and the next kept sample falls after last+dt.
 // Y is not filled with NaN.
