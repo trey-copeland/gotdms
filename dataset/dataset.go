@@ -785,10 +785,24 @@ func validateWindow(hits []Occurrence, window bool) error {
 }
 
 func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis time.Time, cc *clockCache) (Series, error) {
+	// A descending (negative-increment) channel runs from later to earlier
+	// times, so its pieces must be merged latest-start first. Ordering them
+	// ascending, as for a positive increment, makes the overlap/gap pass walk
+	// backwards: files get dropped or the merged Times come out non-monotonic.
+	descending := false
+	for i := range pieces {
+		if pieces[i].dt < 0 {
+			descending = true
+			break
+		}
+	}
 	sort.Slice(pieces, func(i, j int) bool {
 		if !pieces[i].start.Equal(pieces[j].start) {
 			if pieces[i].timed != pieces[j].timed {
 				return pieces[i].timed
+			}
+			if descending {
+				return pieces[i].start.After(pieces[j].start)
 			}
 			return pieces[i].start.Before(pieces[j].start)
 		}

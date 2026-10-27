@@ -858,6 +858,58 @@ func TestZeroAndNegativeIncrement(t *testing.T) {
 	}
 }
 
+func TestDescendingWaveformMergeKeepsAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	// Two negative-increment (descending) waveform files, the later-start one
+	// first in time. The merge must keep every sample in descending time
+	// order. Before the fix, finish() sorted pieces ascending by start, so the
+	// overlap pass walked backwards and dropped the earlier-start file.
+	writeWave(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", epoch.Add(5*time.Second), -1, []float64{5, 4, 3})
+	writeWave(t, filepath.Join(dir, "b.tdms"), "acq", "ai0", epoch.Add(2*time.Second), -1, []float64{2, 1, 0})
+	ds := openWave(t, dir)
+	s, err := ds.Read(Selector{Name: "ai0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFloats(s.Y, []float64{5, 4, 3, 2, 1, 0}) {
+		t.Fatalf("Y = %v", s.Y)
+	}
+	want := []time.Time{
+		epoch.Add(5 * time.Second), epoch.Add(4 * time.Second), epoch.Add(3 * time.Second),
+		epoch.Add(2 * time.Second), epoch.Add(1 * time.Second), epoch,
+	}
+	if !sameTimes(s.Times, want) {
+		t.Fatalf("Times = %v", s.Times)
+	}
+	if len(s.Gaps) != 0 {
+		t.Fatalf("unexpected gaps %v", s.Gaps)
+	}
+}
+
+func TestDescendingWaveformRecordsGap(t *testing.T) {
+	dir := t.TempDir()
+	// A hole between two descending files: file a ends at t=8s, file b starts
+	// at t=5s, so the samples at 7s and 6s are missing. gapBetween must report
+	// it; before the fix it returned false for any dt <= 0.
+	writeWave(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", epoch.Add(10*time.Second), -1, []float64{10, 9, 8})
+	writeWave(t, filepath.Join(dir, "b.tdms"), "acq", "ai0", epoch.Add(5*time.Second), -1, []float64{5, 4, 3})
+	ds := openWave(t, dir)
+	s, err := ds.Read(Selector{Name: "ai0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFloats(s.Y, []float64{10, 9, 8, 5, 4, 3}) {
+		t.Fatalf("Y = %v", s.Y)
+	}
+	if len(s.Gaps) != 1 {
+		t.Fatalf("want one gap, got %v", s.Gaps)
+	}
+	// From is after To when dt is negative (documented Gap semantics).
+	if !s.Gaps[0].From.Equal(epoch.Add(7*time.Second)) || !s.Gaps[0].To.Equal(epoch.Add(5*time.Second)) {
+		t.Fatalf("gap = %+v", s.Gaps[0])
+	}
+}
+
 func TestResample(t *testing.T) {
 	dir := t.TempDir()
 	writePair(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", []float64{0, 1}, []float64{0, 10})
@@ -958,6 +1010,9 @@ func TestTimeSlack(t *testing.T) {
 	neg := addDt(t0, -1)
 	if overlaps(neg, t0, -1) || gapBetween(neg, t0, -1) || !overlaps(neg.Add(2*time.Nanosecond), t0, -1) {
 		t.Fatal("negative dt")
+	}
+	if gapBetween(neg.Add(-time.Nanosecond), t0, -1) || !gapBetween(neg.Add(-2*time.Nanosecond), t0, -1) {
+		t.Fatal("negative dt gap")
 	}
 }
 

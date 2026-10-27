@@ -962,10 +962,15 @@ func overlaps(t, last time.Time, dt float64) bool {
 }
 
 func gapBetween(t, last time.Time, dt float64) bool {
-	if dt <= 0 {
-		return false
+	if dt > 0 {
+		return t.After(addDt(last, dt).Add(timeSlack))
 	}
-	return t.After(addDt(last, dt).Add(timeSlack))
+	if dt < 0 {
+		// Descending axis: the next expected instant is earlier than last.
+		// A gap is a sample earlier still than that expected step.
+		return t.Before(addDt(last, dt).Add(-timeSlack))
+	}
+	return false
 }
 
 // roundedStep is dt rounded to nanoseconds, the same rounding addDt applies.
