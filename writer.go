@@ -958,6 +958,15 @@ func (o *wObj) set(name string, value any) error {
 	return nil
 }
 
+// setProp stores a Property verbatim, keeping its exact DataType rather than
+// re-inferring one from the Go value. Defragment uses it so a property copied
+// from a source file keeps the type code it had on disk.
+func (o *wObj) setProp(p Property) {
+	upsert(&o.props, p)
+	o.dirty = true
+	o.rev++
+}
+
 func normalizeProp(name string, value any) (Property, error) {
 	switch v := value.(type) {
 	case int:

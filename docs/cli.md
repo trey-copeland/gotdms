@@ -9,6 +9,8 @@ go run ./cmd/gotdms info run.tdms
 go run ./cmd/gotdms info --json run.tdms
 go run ./cmd/gotdms convert -o run.csv run.tdms
 go run ./cmd/gotdms convert --group acquisition --channel temperature -o temp.csv run.tdms
+go run ./cmd/gotdms defragment run.tdms
+go run ./cmd/gotdms defragment -o clean.tdms run.tdms
 ```
 
 `go install github.com/trey-copeland/gotdms/cmd/gotdms@latest` builds the latest tagged release, `v0.2.0`, into `$(go env GOPATH)/bin` (or `GOBIN` when set); put that directory on `PATH`. Flags added after that tag are listed under Unreleased in [CHANGELOG.md](../CHANGELOG.md) and need a checkout until the next tag. `gotdms help` prints the usage.
@@ -22,3 +24,7 @@ go run ./cmd/gotdms convert --group acquisition --channel temperature -o temp.cs
 `gotdms index [--force] [--check] file.tdms...` writes one sidecar per file. Several file arguments, a directory of `.tdms` files, or a pattern are accepted. An argument that already exists is that path, including a name that contains `*`, `?`, or `[`. A directory skips entries that are not regular files. The same path reached twice is indexed once. Without `--force`, a sidecar that already matches is left in place. `--check` reports whether each existing sidecar matches and does not write. The process exits non-zero if any file fails.
 
 The sidecar itself is described in [Segment index](segment-index.md). Torn-tail recovery behind `--lenient` is in [File status, torn tails, and Follow](file-status.md).
+
+## defragment
+
+`gotdms defragment [-o out.tdms] [--lenient] file.tdms` rewrites a file so each channel's raw data is contiguous and the per-segment overhead collapses into a single segment, which makes later reads faster. Values, channel structure and order, data types, and final property values are unchanged; output is little-endian TDMS 2.0. With no `-o` the file is rewritten in place through a temporary file renamed over the original, so an interrupted run leaves either the old file or the new one. `-o` writes the copy elsewhere and leaves the input untouched. `--lenient` opens with `WithLenientTail` first, so a file ending in a torn tail is recovered (the torn bytes dropped) before it is rewritten. A file with DAQmx raw data (`ErrDAQmx`) or a big-endian segment (`ErrUnsupported`) is rejected and nothing is written; this tool does not produce those layouts. The exit status is non-zero on failure. The Go API is [Defragment](defragment.md).

@@ -114,6 +114,19 @@
 // Write: the offset table needs every length first. Finish patches a seekable
 // lead-in. A short stream is not patched into a finished segment.
 //
+// # Defragment
+//
+// Defragment, DefragmentToFile, and DefragmentFile rewrite a file that was
+// written in many segments as one contiguous segment, so later reads are
+// faster. This matches NI LabVIEW's TDMS Defragment: the channel tree, order,
+// types, values, and final property values are unchanged. A file whose data
+// channels are all fixed-size is copied byte for byte through a declared-count
+// Stream, with no value decode and memory bounded by one read batch per
+// channel; a file with a string channel is buffered. DAQmx raw data returns
+// ErrDAQmx and a big-endian segment returns ErrUnsupported, because this
+// package writes neither. DefragmentFile rewrites in place through a temporary
+// file renamed over the original.
+//
 // Files are little-endian, version 4713 (TDMS 2.0). Big-endian segments are
 // accepted on read. DAQmx raw data (kTocDAQmxRawData, index words 0x00001269,
 // 0x00001369, and 0x0000126A) is decoded to the scaler's native type. Values
@@ -141,6 +154,7 @@
 //
 //   - [Reading]: Open, Values, Cursor, typed helpers, chunk statistics.
 //   - [Writing]: Create, Flush, Write copy semantics, WithSync, Stream.
+//   - [Defragment]: Defragment, DefragmentToFile, DefragmentFile.
 //   - [Waveforms]: Waveform, ReadWaveform, WaveformHeader, scales.
 //   - [File status]: File.Status, WithLenientTail, torn tails, Follow.
 //   - [Datasets]: the dataset subpackage.
@@ -154,6 +168,7 @@
 //
 // [Reading]: https://github.com/trey-copeland/gotdms/blob/main/docs/reading.md
 // [Writing]: https://github.com/trey-copeland/gotdms/blob/main/docs/writing.md
+// [Defragment]: https://github.com/trey-copeland/gotdms/blob/main/docs/defragment.md
 // [Waveforms]: https://github.com/trey-copeland/gotdms/blob/main/docs/waveforms.md
 // [File status]: https://github.com/trey-copeland/gotdms/blob/main/docs/file-status.md
 // [Datasets]: https://github.com/trey-copeland/gotdms/blob/main/docs/dataset.md

@@ -11,6 +11,7 @@
 | `Create`, `NewWriter`, `Writer` | `SetProperty`, `Group`, `SetInterleaved`, `Flush`, `Sync`, `Close`, `Stream`. `WithWriteBuffer` (default 1 MiB). `WithSync` (fsync each segment around the lead-in patch). |
 | `GroupWriter`, `ChannelWriter` | `SetProperty`, `Channel`, `Write`, `WriteNoCopy`, `WriteWaveform`, `Stream`, `StreamWaveform`. |
 | `Stream` | Declared-count segment. `Write`, `WriteInterleaved`, `Finish`. |
+| `Defragment`, `DefragmentToFile`, `DefragmentFile` | Rewrite a fragmented file as one contiguous segment. In place (`DefragmentFile`) is atomic. Rejects DAQmx (`ErrDAQmx`) and big-endian (`ErrUnsupported`). See [Defragment](defragment.md). |
 | `Waveform[T]`, `ReadWaveform`, `ScaledWaveform` | Analog waveform. `ApplyScale` applies a `LinearScale` explicitly. |
 | `WaveformHeader` | t0, dt, unit, and `wf_samples` without loading Y. `TimeAt` timestamps cursor batches. |
 | `DataType` | NI `tdsDataType` codes. `String`, `Size`. |

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,10 @@ func exerciseFile(t *testing.T, file *File, data []byte) {
 		}
 		_, _ = g.Values()
 	}
+	// Defragmenting an opened fuzz file must not panic; an error is fine.
+	// Reached only after the per-channel length guard above, so totals are
+	// bounded. defragment reuses the already-parsed file.
+	_ = defragment(io.Discard, file)
 }
 
 // FuzzSegmentIndex feeds the .gtdx decoder. A decoded sidecar is installed

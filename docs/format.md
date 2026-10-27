@@ -51,6 +51,7 @@ Other limits are in the support matrix below: big-endian segments are read and n
 | Chunk min/max/mean/RMS | numeric channels, one pass, caller-chosen chunk | n/a |
 | Segment-index sidecar (`.gtdx`) | opt-in `WithSegmentIndex`; ignored when stale or corrupt | not written by the TDMS writer |
 | `name` property renaming an object (TDMS 2.0) | kept as a normal property; the path does not change | same |
+| Defragment (rewrite a fragmented file as one contiguous segment) | n/a | yes, as little-endian TDMS 2.0; DAQmx returns `ErrDAQmx` and a big-endian segment returns `ErrUnsupported`. See [Defragment](defragment.md) |
 
 Integer and float type codes are the usual 1–10 (`int8` through `float64`). The NI article's lead-in example labels bytes `0E 00 00 00` as mask `0x1110`. That label is the binary value `0b1110`; the bytes are the mask `0x0E` (metadata, new object list, and raw data). ToC itself is always little-endian. When `TocBigEndian` is set, every other numeric field in the segment is big-endian, including the version and both offsets in the lead-in.
 

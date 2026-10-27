@@ -4,6 +4,7 @@
 //	gotdms info [--json] [--lenient] file.tdms
 //	gotdms convert [-o out.csv] [--group name] [--channel name] file.tdms
 //	gotdms index [--force] [--check] file.tdms...
+//	gotdms defragment [-o out.tdms] [--lenient] file.tdms
 //
 // info lists groups, channels (data type and sample count), and properties
 // at file, group, and channel level. --json writes the same tree as JSON.
@@ -32,6 +33,7 @@ Usage:
   gotdms info [--json] [--lenient] file.tdms
   gotdms convert [-o out.csv] [--group name] [--channel name] file.tdms
   gotdms index [--force] [--check] file.tdms...
+  gotdms defragment [-o out.tdms] [--lenient] file.tdms
 
 info prints groups, channels (data type and sample count), and properties
 at file, group, and channel level. --json prints that tree as JSON.
@@ -56,6 +58,15 @@ the .tdms matches. Without --force, a sidecar that already matches is left
 in place. --force rebuilds every sidecar. --check reports whether each
 existing sidecar matches and does not write. --check and --force cannot be
 combined. The exit status is non-zero when any file fails.
+
+defragment rewrites a file so each channel's raw data is contiguous and the
+per-segment overhead collapses into a single segment, which makes later reads
+faster. Values, channel structure and order, data types, and final property
+values are unchanged. Output is little-endian TDMS 2.0. With no -o the file is
+rewritten in place through a temporary file renamed over the original, so an
+interrupted run leaves either the old file or the new one. -o writes the copy
+elsewhere and leaves the input untouched. A file with DAQmx raw data or a
+big-endian segment is rejected, because this tool does not write those layouts.
 `
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -70,6 +81,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runConvert(args[1:], stdout, stderr)
 	case "index":
 		return runIndex(args[1:], stdout, stderr)
+	case "defragment":
+		return runDefragment(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usageText)
 		return 0
