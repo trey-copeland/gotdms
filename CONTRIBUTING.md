@@ -14,7 +14,7 @@ These checks must pass before a pull request can merge:
 - `test (windows, go 1.22)`
 - `differential test against npTDMS`
 
-All four are jobs of [`.github/workflows/build-and-test-go-module.yml`](.github/workflows/build-and-test-go-module.yml). The module declares `go 1.22`; CI also builds with Go 1.27. To run the test jobs' checks locally from the repository root:
+All four are jobs of [`.github/workflows/build-and-test-go-module.yml`](.github/workflows/build-and-test-go-module.yml). The module declares `go 1.22`; CI also builds with Go 1.27. The same workflow also runs `test 32-bit (ubuntu 386, go 1.22)` and `test 32-bit (ubuntu 386, go 1.27)`, which are not required. To run the test jobs' checks locally from the repository root:
 
 ```bash
 gofmt -l .
@@ -22,7 +22,11 @@ go vet ./...
 go test ./...
 go test -race .
 go test -race ./dataset/
+GOARCH=386 go vet ./...
+GOARCH=386 go test ./...
 ```
+
+`GOARCH=386` binaries run natively on linux/amd64 and windows/amd64, so the 32-bit tests need no emulator. `-race` is not available on 386.
 
 `gofmt -l` must print nothing. The differential job installs npTDMS in CI as a test-only oracle; it is not a dependency of this module. See [docs/testing.md](docs/testing.md#nptdms-differential-tests-ci-only).
 

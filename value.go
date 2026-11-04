@@ -152,7 +152,7 @@ func encodeStdValue(dt DataType, v any) ([]byte, error) {
 		if !ok {
 			return nil, typeErr(dt, v)
 		}
-		if len(s) > math.MaxUint32 {
+		if uint64(len(s)) > math.MaxUint32 {
 			return nil, fmt.Errorf("%w: string longer than 4 GiB", ErrArgument)
 		}
 		out := appendU32(nil, uint32(len(s)))
@@ -626,7 +626,7 @@ func decodeStrings(block []byte, n int, bo binary.ByteOrder) ([]string, error) {
 	var prev uint32
 	for i := 0; i < n; i++ {
 		end := bo.Uint32(block[i*4:])
-		if end < prev || int(end) > len(payload) {
+		if end < prev || uint64(end) > uint64(len(payload)) {
 			return nil, ErrCorrupt
 		}
 		out[i] = ignoreTrailingNUL(payload[prev:end])

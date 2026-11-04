@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"sync/atomic"
+	"unsafe"
 )
 
 // segmentParses counts full segment-header walks. A sidecar hit does not
@@ -603,6 +604,17 @@ func readTyped(r io.ReaderAt, path string, dt DataType, hasDT bool, spans []span
 		v, err := emptyOf(dt)
 		return v, wrap("read", path, err)
 	}
+	// The raw bytes and the decoded slice must both stay within int bytes.
+	// That only binds on 32-bit platforms. Extended is 10 bytes on disk and
+	// larger in memory.
+	if sz, ok := dt.Size(); ok && sz > 0 {
+		if dt.storage() == TypeExtendedFloat {
+			sz = int(unsafe.Sizeof(Extended{}))
+		}
+		if n > math.MaxInt/sz {
+			return nil, wrap("read", path, fmt.Errorf("%w: %d values of %s exceed int bytes", ErrUnsupported, n, dt))
+		}
+	}
 	if v, ok, err := readFastSpans(dt, spans, runs, r, start, n, reuse); ok || err != nil {
 		if err != nil {
 			return nil, wrap("read", path, err)
@@ -685,6 +697,9 @@ func (f *File) parse() (err error) {
 		big := lead.toc&TocBigEndian != 0
 		newList := lead.toc&TocNewObjList != 0
 		if hasMeta {
+			if lead.raw > uint64(math.MaxInt) {
+				return wrapf("read", f.path, ErrUnsupported, "segment at %d has %d metadata bytes, more than int", pos, lead.raw)
+			}
 			meta := make([]byte, lead.raw)
 			if lead.raw > 0 {
 				if err := readFull(f.r, meta, pos+leadInSize); err != nil {
@@ -1270,6 +1285,12 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 		if err != nil {
 			return 0, err
 		}
+		// Len, Values, and Slice index samples with int. On a 32-bit
+		// platform a channel past math.MaxInt values cannot be addressed,
+		// so reject it here instead of wrapping later.
+		if s.ch.total > int64(math.MaxInt) {
+			return 0, fmt.Errorf("%w: channel %s has more values than int", ErrUnsupported, s.ch.path)
+		}
 		s.ch.spans, s.ch.runs = appendSpan(s.ch.spans, s.ch.runs, sp)
 	}
 	if incomplete {
@@ -1371,6 +1392,9 @@ func (f *File) ensureChannel(group, name string) *Channel {
 }
 
 func (c *Channel) readPacked(r io.ReaderAt, start, n, size int) ([]byte, error) {
+	if n < 0 || size <= 0 || n > math.MaxInt/size {
+		return nil, fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, size)
+	}
 	dst := make([]byte, n*size)
 	if err := c.fillPacked(r, start, n, size, dst); err != nil {
 		return nil, err
@@ -1384,7 +1408,7 @@ func (sp *span) copyRun(runs []spanRun, r io.ReaderAt, start, n int64, dst []byt
 	if n == 0 {
 		return nil
 	}
-	if sp.runIdx == 0 || int(sp.runIdx) >= len(runs) || runs[sp.runIdx].count <= 1 || runs[sp.runIdx].step <= 0 || sp.partialN != 0 || sp.str || sp.nPerChunk <= 0 || sp.typeSize <= 0 {
+	if sp.runIdx == 0 || uint64(sp.runIdx) >= uint64(len(runs)) || runs[sp.runIdx].count <= 1 || runs[sp.runIdx].step <= 0 || sp.partialN != 0 || sp.str || sp.nPerChunk <= 0 || sp.typeSize <= 0 {
 		return ErrCorrupt
 	}
 	per, err := mul64(sp.nChunks, sp.nPerChunk)
@@ -1696,6 +1720,9 @@ func (sp *span) loadStringWindow(r io.ReaderAt, off int64, nAll, local, take int
 	payload := sp.strSize - table
 	if int64(end) > payload {
 		return nil, ErrCorrupt
+	}
+	if uint64(end-start) > uint64(math.MaxInt) {
+		return nil, fmt.Errorf("%w: string window of %d bytes exceeds int", ErrUnsupported, end-start)
 	}
 	nbytes := int(end - start)
 	buf := make([]byte, nbytes)

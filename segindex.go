@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -517,7 +518,7 @@ func segmentFingerprint(r interface {
 			// lead.raw <= segEnd-pos-leadInSize and the allocation below is
 			// bounded by the segment, not the declared length. The check is
 			// repeated here so the bound does not depend on that helper.
-			if lead.raw > uint64(segEnd-pos-leadInSize) {
+			if lead.raw > uint64(segEnd-pos-leadInSize) || lead.raw > uint64(math.MaxInt) {
 				return 0, ErrCorrupt
 			}
 			meta := make([]byte, lead.raw)
@@ -892,7 +893,10 @@ func spanListInFile(spans []span, runs []spanRun, size int64) error {
 			return err
 		}
 		samples, err = add64(samples, n)
-		if err != nil {
+		// A channel past math.MaxInt values cannot be read on a 32-bit
+		// platform. A parse rejects it with ErrUnsupported, so the sidecar
+		// must not admit it either.
+		if err != nil || samples > int64(math.MaxInt) {
 			return errIndex
 		}
 		if spans[i].str {
@@ -923,7 +927,7 @@ func spanListInFile(spans []span, runs []spanRun, size int64) error {
 
 func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 	reps := sp.repeats(runs)
-	if sp.runIdx != 0 && (int(sp.runIdx) >= len(runs) || runs[sp.runIdx].count < 2 || runs[sp.runIdx].step <= 0 || sp.partialN != 0 || sp.str || sp.live) {
+	if sp.runIdx != 0 && (uint64(sp.runIdx) >= uint64(len(runs)) || runs[sp.runIdx].count < 2 || runs[sp.runIdx].step <= 0 || sp.partialN != 0 || sp.str || sp.live) {
 		return 0, errIndex
 	}
 	if err := spanExtent(sp, sp.dataPos, size); err != nil {
@@ -946,7 +950,7 @@ func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 		}
 	}
 	samples, err := spanSamples(&sp, runs)
-	if err != nil || samples < 0 {
+	if err != nil || samples < 0 || sp.nPerChunk > int64(math.MaxInt) {
 		return 0, errIndex
 	}
 	if sp.str {
@@ -1144,7 +1148,7 @@ func (w *ixw) u64(v uint64) {
 func (w *ixw) i64(v int64) { w.u64(uint64(v)) }
 
 func (w *ixw) str(s string) error {
-	if len(s) > int(^uint32(0)) {
+	if uint64(len(s)) > math.MaxUint32 {
 		return errIndex
 	}
 	w.u32(uint32(len(s)))
@@ -1195,7 +1199,7 @@ func (w *ixw) span(sp span, runs []spanRun) {
 	}
 	rc := int64(1)
 	step := int64(0)
-	if sp.runIdx != 0 && int(sp.runIdx) < len(runs) && runs[sp.runIdx].count > 1 {
+	if sp.runIdx != 0 && uint64(sp.runIdx) < uint64(len(runs)) && runs[sp.runIdx].count > 1 {
 		rc = runs[sp.runIdx].count
 		step = runs[sp.runIdx].step
 	}

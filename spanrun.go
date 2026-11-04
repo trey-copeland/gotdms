@@ -141,10 +141,10 @@ func appendSpan(spans []span, runs []spanRun, sp span) ([]span, []spanRun) {
 // extendRun continues an existing run. The span stays where it is, so a
 // uniform file does not copy it on every segment.
 func extendRun(last *span, runs []spanRun, next span) bool {
-	idx := int(last.runIdx)
-	if idx <= 0 || idx >= len(runs) {
+	if last.runIdx == 0 || uint64(last.runIdx) >= uint64(len(runs)) {
 		return false
 	}
+	idx := int(last.runIdx)
 	rec := &runs[idx]
 	count := rec.count
 	step := rec.step
@@ -174,7 +174,7 @@ func extendRun(last *span, runs []spanRun, next span) bool {
 }
 
 func (sp *span) repeats(runs []spanRun) int64 {
-	if sp == nil || sp.runIdx == 0 || int(sp.runIdx) >= len(runs) {
+	if sp == nil || sp.runIdx == 0 || uint64(sp.runIdx) >= uint64(len(runs)) {
 		return 1
 	}
 	n := runs[sp.runIdx].count
@@ -185,7 +185,7 @@ func (sp *span) repeats(runs []spanRun) int64 {
 }
 
 func (sp *span) repeatStep(runs []spanRun) int64 {
-	if sp == nil || sp.runIdx == 0 || int(sp.runIdx) >= len(runs) || runs[sp.runIdx].count <= 1 {
+	if sp == nil || sp.runIdx == 0 || uint64(sp.runIdx) >= uint64(len(runs)) || runs[sp.runIdx].count <= 1 {
 		return 0
 	}
 	return runs[sp.runIdx].step

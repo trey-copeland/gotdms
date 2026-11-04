@@ -284,7 +284,7 @@ func (c *Channel) daqmxScaleInput(id uint32, named bool) ([]float64, error) {
 			return c.Float64s()
 		}
 		total := c.daqmx.totals[idx]
-		if total > int64(math.MaxInt) {
+		if total > int64(math.MaxInt/8) {
 			return nil, fmt.Errorf("%w: scaler %d has %d values", ErrUnsupported, id, total)
 		}
 		v, err := c.DAQmxSlice(id, 0, int(total))
@@ -619,7 +619,7 @@ func (d *decoder) daqmxIndex(header uint32) (*daqmxSpec, error) {
 		widths[i] = w
 	}
 	for i, sc := range scalers {
-		if int(sc.buffer) >= len(widths) {
+		if uint64(sc.buffer) >= uint64(len(widths)) {
 			return nil, fmt.Errorf("%w: DAQmx raw buffer index %d", ErrCorrupt, sc.buffer)
 		}
 		w := widths[sc.buffer]
@@ -774,10 +774,13 @@ func (f *File) addDAQmxSpans(slots []rawSlot, dataPos, rawLen int64, big, live b
 			return 0, ErrCorrupt
 		}
 		for _, sc := range s.daqmx.scalers {
-			b := int(sc.buffer)
-			if b < 0 || b >= nBuf {
+			if uint64(sc.buffer) >= uint64(nBuf) {
 				return 0, fmt.Errorf("%w: DAQmx raw buffer index %d", ErrCorrupt, sc.buffer)
 			}
+			if s.n > int64(math.MaxInt) {
+				return 0, fmt.Errorf("%w: chunk has more values than int", ErrUnsupported)
+			}
+			b := int(sc.buffer)
 			if !seen[b] {
 				seen[b] = true
 				samples[b] = s.n
@@ -862,6 +865,9 @@ func (f *File) addDAQmxSpans(slots []rawSlot, dataPos, rawLen int64, big, live b
 			st.totals[k], err = add64(st.totals[k], add)
 			if err != nil {
 				return 0, err
+			}
+			if st.totals[k] > int64(math.MaxInt) {
+				return 0, fmt.Errorf("%w: channel %s has more values than int", ErrUnsupported, s.ch.path)
 			}
 			if k != spec.primary {
 				continue
@@ -1054,7 +1060,7 @@ func (r *ixr) daqmxBlock(primarySpans []span, primaryRuns []spanRun, primaryTota
 		if err != nil {
 			return nil, err
 		}
-		if flags&^3 != 0 || int(buffer) >= len(widths) {
+		if flags&^3 != 0 || uint64(buffer) >= uint64(len(widths)) {
 			return nil, errIndex
 		}
 		digital := flags&1 != 0

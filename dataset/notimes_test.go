@@ -11,6 +11,7 @@ import (
 	"sort"
 	"testing"
 	"time"
+	"unsafe"
 
 	tdms "github.com/trey-copeland/gotdms"
 )
@@ -322,6 +323,7 @@ func TestWithoutTimesAllocatesNoTimeAxis(t *testing.T) {
 		}
 	}
 	untimed := allocBytes(readAll(usels))
+	timeSize := uint64(unsafe.Sizeof(time.Time{}))
 	for _, c := range []struct {
 		what  string
 		plain func()
@@ -333,9 +335,10 @@ func TestWithoutTimesAllocatesNoTimeAxis(t *testing.T) {
 	} {
 		plain, shared, vals := allocBytes(c.plain), allocBytes(c.share), allocBytes(c.vals)
 		t.Logf("%s: default %d B, WithSharedClock %d B, WithoutTimes %d B, untimed Read %d B", c.what, plain, shared, vals, untimed)
-		// The default holds 24 bytes per sample per channel of Times, the
-		// shared clock 8 bytes per sample once.
-		if plain-vals < 24*n*nch*95/100 || shared-vals < 8*n*95/100 {
+		// The default holds one time.Time (24 bytes on 64-bit platforms,
+		// 20 on 32-bit ones) per sample per channel of Times, the shared
+		// clock 8 bytes per sample once.
+		if plain-vals < timeSize*n*nch*95/100 || shared-vals < 8*n*95/100 {
 			t.Fatalf("%s: WithoutTimes saves too little: default %d, shared %d, values-only %d", c.what, plain, shared, vals)
 		}
 		// Anything left over is far below one int64 per sample.
