@@ -4,6 +4,20 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
+## v0.3.0 (2026-11-04)
+
+`v0.3.0` is the changes since `v0.2.0` (`290bb79`). They landed on `main` in [#36](https://github.com/trey-copeland/gotdms/pull/36) through [#41](https://github.com/trey-copeland/gotdms/pull/41); #36 to #40 are by @awolpe.
+
+### Behavior changes
+
+Each is described in full below.
+
+- `dataset`: a descending (negative `wf_increment`) waveform now reports a negative `Dt`, for a single file and a merge across files, where it used to report 0. Files of one channel whose increments disagree in sign now return `ErrArgument`.
+- A `Writer` whose segment write fails stays failed: later `Write`, `Flush`, `Sync`, and `Stream` calls return the first error, and `Close` returns it without writing.
+- A segment-index sidecar that breaks the stricter span rules is a cache miss, so the file is parsed instead.
+- On 32-bit platforms, a channel with more than 2^31−1 values (and the other limits below) returns `ErrUnsupported` instead of wrapping or panicking. 64-bit behavior is unchanged.
+- The published nightly mutation-testing figures are withdrawn; they did not measure the tests.
+
 ### Added
 
 - `Defragment`, `DefragmentToFile`, and `DefragmentFile` rewrite a fragmented file (one segment per append) as a single contiguous segment, so later reads are faster, matching the intent of NI LabVIEW's TDMS Defragment. The channel tree, channel order, data types, every value, and each object's final property values are unchanged; output is little-endian TDMS 2.0. A file whose data channels are all fixed-size is copied byte for byte through a declared-count `Stream`, with no value decode or re-encode and resident memory bounded by one `WithReadBuffer`-sized batch per channel; a file with a string channel takes a buffered path (the offset table needs every length first). `DefragmentToFile` and `DefragmentFile` (in place) write a temporary file in the destination's directory, fsync it, rename it over the destination, and sync the directory (best effort; not on Windows). An error leaves the destination as it was, the destination may be the source by any path or link, a symbolic link at the destination is kept, and permission bits are kept (or taken from the source for a new file). DAQmx raw data returns `ErrDAQmx` and a big-endian segment returns `ErrUnsupported`, checked before any byte is written, because this package produces neither layout. A typed channel with zero samples keeps its type (a raw-data index with a count of 0); a channel that never had a type stays void. `ReaderOption`s pass through, so `WithLenientTail` defragments a file that ends in a recoverable torn tail. See [docs/defragment.md](docs/defragment.md).

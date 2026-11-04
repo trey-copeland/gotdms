@@ -113,7 +113,7 @@ The Python and Polars package is [github.com/trey-copeland/gotdms-python](https:
 
 ## Releasing
 
-`v0.2.0` is the latest tag. Notes for each release are in [CHANGELOG.md](CHANGELOG.md). The tag checklist is in [docs/releasing.md](docs/releasing.md). A tag of this module does not publish the Python package.
+`v0.3.0` is the latest tag. Notes for each release are in [CHANGELOG.md](CHANGELOG.md). The tag checklist is in [docs/releasing.md](docs/releasing.md). A tag of this module does not publish the Python package.
 
 ## Contributing
 
