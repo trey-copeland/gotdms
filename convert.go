@@ -181,10 +181,10 @@ func toInt64s(v any) ([]int64, error) {
 }
 
 // fitsInt returns ErrUnsupported when n values of width bytes take more
-// than math.MaxInt bytes. It only binds on 32-bit platforms, where the
+// than maxInt bytes. It only binds on 32-bit platforms, where the
 // []float64 or []int64 a conversion allocates could not be indexed.
 func fitsInt(n int64, width int) error {
-	if n < 0 || width <= 0 || n > int64(math.MaxInt/width) {
+	if n < 0 || width <= 0 || n > int64(maxInt/width) {
 		return fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, width)
 	}
 	return nil

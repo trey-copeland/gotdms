@@ -207,7 +207,7 @@ func (c *Channel) readSpanInto(r io.ReaderAt, sp *span, dst any, dstSample, n in
 		normalize(c.dt, raw, sp.big)
 		return nil
 	}
-	if n < 0 || n > math.MaxInt/sz {
+	if n < 0 || n > maxInt/sz {
 		return fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, sz)
 	}
 	buf := make([]byte, n*sz)
@@ -410,7 +410,7 @@ func makeValues(dt DataType, n int) (any, error) {
 // platforms, where make would otherwise panic with "len out of range".
 func makeN[T any](n int) (any, error) {
 	var zero T
-	if n < 0 || (unsafe.Sizeof(zero) > 0 && uintptr(n) > uintptr(math.MaxInt)/unsafe.Sizeof(zero)) {
+	if n < 0 || (unsafe.Sizeof(zero) > 0 && uintptr(n) > uintptr(maxInt)/unsafe.Sizeof(zero)) {
 		return nil, fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, unsafe.Sizeof(zero))
 	}
 	return make([]T, n), nil

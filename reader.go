@@ -607,11 +607,11 @@ func readTyped(r io.ReaderAt, path string, dt DataType, hasDT bool, spans []span
 	// The raw bytes and the decoded slice must both stay within int bytes.
 	// That only binds on 32-bit platforms. Extended is 10 bytes on disk and
 	// larger in memory.
-	if sz, ok := dt.Size(); ok && sz > 0 {
+	if sz, ok := dt.Size(); ok { // Size reports ok only with sz > 0
 		if dt.storage() == TypeExtendedFloat {
 			sz = int(unsafe.Sizeof(Extended{}))
 		}
-		if n > math.MaxInt/sz {
+		if n > maxInt/sz {
 			return nil, wrap("read", path, fmt.Errorf("%w: %d values of %s exceed int bytes", ErrUnsupported, n, dt))
 		}
 	}
@@ -697,7 +697,7 @@ func (f *File) parse() (err error) {
 		big := lead.toc&TocBigEndian != 0
 		newList := lead.toc&TocNewObjList != 0
 		if hasMeta {
-			if lead.raw > uint64(math.MaxInt) {
+			if lead.raw > uint64(maxInt) {
 				return wrapf("read", f.path, ErrUnsupported, "segment at %d has %d metadata bytes, more than int", pos, lead.raw)
 			}
 			meta := make([]byte, lead.raw)
@@ -1288,7 +1288,7 @@ func (f *File) addSpans(slots []rawSlot, dataPos, rawLen int64, interleaved, big
 		// Len, Values, and Slice index samples with int. On a 32-bit
 		// platform a channel past math.MaxInt values cannot be addressed,
 		// so reject it here instead of wrapping later.
-		if s.ch.total > int64(math.MaxInt) {
+		if s.ch.total > int64(maxInt) {
 			return 0, fmt.Errorf("%w: channel %s has more values than int", ErrUnsupported, s.ch.path)
 		}
 		s.ch.spans, s.ch.runs = appendSpan(s.ch.spans, s.ch.runs, sp)
@@ -1392,7 +1392,7 @@ func (f *File) ensureChannel(group, name string) *Channel {
 }
 
 func (c *Channel) readPacked(r io.ReaderAt, start, n, size int) ([]byte, error) {
-	if n < 0 || size <= 0 || n > math.MaxInt/size {
+	if n < 0 || size <= 0 || n > maxInt/size {
 		return nil, fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, size)
 	}
 	dst := make([]byte, n*size)
@@ -1721,7 +1721,7 @@ func (sp *span) loadStringWindow(r io.ReaderAt, off int64, nAll, local, take int
 	if int64(end) > payload {
 		return nil, ErrCorrupt
 	}
-	if uint64(end-start) > uint64(math.MaxInt) {
+	if uint64(end-start) > uint64(maxInt) {
 		return nil, fmt.Errorf("%w: string window of %d bytes exceeds int", ErrUnsupported, end-start)
 	}
 	nbytes := int(end - start)

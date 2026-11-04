@@ -518,7 +518,7 @@ func segmentFingerprint(r interface {
 			// lead.raw <= segEnd-pos-leadInSize and the allocation below is
 			// bounded by the segment, not the declared length. The check is
 			// repeated here so the bound does not depend on that helper.
-			if lead.raw > uint64(segEnd-pos-leadInSize) || lead.raw > uint64(math.MaxInt) {
+			if lead.raw > uint64(segEnd-pos-leadInSize) || lead.raw > uint64(maxInt) {
 				return 0, ErrCorrupt
 			}
 			meta := make([]byte, lead.raw)
@@ -896,7 +896,7 @@ func spanListInFile(spans []span, runs []spanRun, size int64) error {
 		// A channel past math.MaxInt values cannot be read on a 32-bit
 		// platform. A parse rejects it with ErrUnsupported, so the sidecar
 		// must not admit it either.
-		if err != nil || samples > int64(math.MaxInt) {
+		if err != nil || samples > int64(maxInt) {
 			return errIndex
 		}
 		if spans[i].str {
@@ -950,7 +950,7 @@ func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 		}
 	}
 	samples, err := spanSamples(&sp, runs)
-	if err != nil || samples < 0 || sp.nPerChunk > int64(math.MaxInt) {
+	if err != nil || samples < 0 || sp.nPerChunk > int64(maxInt) {
 		return 0, errIndex
 	}
 	if sp.str {
