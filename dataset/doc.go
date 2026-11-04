@@ -96,12 +96,13 @@
 //
 // Occurrences are read in time order (first kept sample, then file path),
 // latest first when the increment is negative, so a descending waveform split
-// across files merges into one descending series. The window is half-open: start <= t < end. Samples inside one file stay in file
-// order. Overlap and gap policy applies where a new file meets samples already
-// kept. OverlapKeepFirst (the default) drops an incoming sample that lies
+// across files merges into one descending series. The window is half-open:
+// start <= t < end. Samples inside one file stay in file order. Overlap and
+// gap policy applies where a new file meets samples already kept. OverlapKeepFirst (the default) drops an incoming sample that lies
 // inside the previous sample's span: before last+dt when dt is positive, after
 // last+dt when dt is negative, and at or before last when dt is 0.
-// OverlapKeepLast drops kept samples that the incoming sample replaces.
+// OverlapKeepLast drops kept samples that the incoming sample replaces:
+// those at or after it for a positive dt, at or before it for a negative dt.
 // OverlapError returns ErrOverlap. Times are compared at nanosecond resolution:
 // a sample within 1ns of last+dt is the next tick, not an overlap and not a
 // gap. A single-sample file has Dt 0, so the space before the next file is

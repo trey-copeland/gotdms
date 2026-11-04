@@ -61,7 +61,7 @@ func (cc *clockCache) merge(pieces []piece, policy OverlapPolicy) (Series, error
 	if kept == 1 && only.wave != nil {
 		if c := cc.wave(only); c != nil {
 			s := Series{Files: []string{only.file}, Y: only.y, Timed: true, Clock: c}
-			if only.dt > 0 {
+			if only.dt != 0 {
 				s.Dt = only.dt
 			}
 			return s, nil

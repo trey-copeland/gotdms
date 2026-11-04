@@ -23,7 +23,8 @@ const (
 	// OverlapKeepFirst drops the incoming sample. This is the default.
 	OverlapKeepFirst OverlapPolicy = iota
 	// OverlapKeepLast drops already kept samples that the incoming sample
-	// replaces (their time is not strictly before the incoming time).
+	// replaces (their time is not strictly before the incoming time along
+	// the axis: earlier for a positive increment, later for a negative one).
 	OverlapKeepLast
 	// OverlapError makes the read return ErrOverlap.
 	OverlapError
@@ -149,8 +150,9 @@ type Gap struct {
 
 // Series is a merged channel read. Times is nil when Timed is false, and
 // Times and Clock are both nil for a read that passed WithoutTimes.
-// Basis is the time RelativeTimes subtracts. Dt is the shared positive
-// increment when every contributing sample has that increment, else 0.
+// Basis is the time RelativeTimes subtracts. Dt is the shared nonzero
+// increment when every contributing sample has that increment (negative for
+// a descending waveform), else 0.
 type Series struct {
 	Name        string
 	Group       string
