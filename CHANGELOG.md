@@ -8,6 +8,8 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 - A failed segment write (a buffered `Flush`, or the root-only segment of an empty writer) now leaves the `Writer` unusable, as a failed fsync already did. Part of the segment could already be in the underlying writer, and the next `Flush` or `Close` wrote it a second time and corrupted the file. Later `Write`, `Flush`, `Sync`, and `Stream` calls now return the first error, and `Close` returns it without writing. This includes the internal size checks that fail before any byte is written.
 - `Close` on a nil `*Writer` returns `ErrArgument` instead of panicking, like `Flush` and `Sync`.
+- Segment-index sidecar decoding is stricter about untrusted spans. A chunk's strided walk (column, stride, values per chunk) must end inside one chunk. A partial tail must belong to the unfinished final segment (the live flag), start after the span's whole chunks, stay shorter than one chunk, end inside the file, hold no more values than a chunk, and use the chunk's stride; a string tail must be one whole block. Before, a crafted sidecar that kept within the file could read another chunk's or segment's bytes as samples. Any violation is a cache miss and the file is parsed. The sidecar read is capped at the 64 MiB limit even if the file grows after its size check, and the fingerprint walk bounds each metadata allocation by its segment.
+- The `ErrCorrupt` message for a short raw-data index now says 16 bytes, the length it checks.
 
 ## v0.2.0 (2026-10-23)
 

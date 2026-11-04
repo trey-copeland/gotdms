@@ -512,10 +512,12 @@ func segmentFingerprint(r interface {
 		}
 		_, _ = h.Write(hdr[:])
 		if lead.raw > 0 {
-			// Bound the allocation by the bytes left after this lead-in, not
-			// the whole file, so a corrupt metadata length near EOF cannot
-			// force a file-sized buffer before readFull fails a few bytes in.
-			if lead.raw > uint64(size-pos-leadInSize) {
+			// segmentBounds has already checked that the metadata ends inside
+			// this segment and inside the file (dataPos <= segEnd <= size), so
+			// lead.raw <= segEnd-pos-leadInSize and the allocation below is
+			// bounded by the segment, not the declared length. The check is
+			// repeated here so the bound does not depend on that helper.
+			if lead.raw > uint64(segEnd-pos-leadInSize) {
 				return 0, ErrCorrupt
 			}
 			meta := make([]byte, lead.raw)
@@ -963,8 +965,21 @@ func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 				return 0, errIndex
 			}
 		}
-		if sp.partialN > 0 && (sp.partialPos < 0 || sp.partialPos > size) {
-			return 0, errIndex
+		if sp.partialN > 0 {
+			if sp.partialPos < 0 || sp.partialPos > size {
+				return 0, errIndex
+			}
+			// A partial string tail is one whole offset table and payload.
+			if sp.partialN != sp.nPerChunk {
+				return 0, errIndex
+			}
+			tail, err := add64(sp.partialPos, sp.strSize)
+			if err != nil {
+				return 0, errIndex
+			}
+			if err := partialInSegment(sp, sp.partialPos, tail, size); err != nil {
+				return 0, err
+			}
 		}
 		return samples, nil
 	}
@@ -995,18 +1010,58 @@ func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 		if sp.partialPos < 0 || sp.partialPos > size {
 			return 0, errIndex
 		}
+		if sp.partialN > 1 && sp.partialStride <= 0 {
+			return 0, errIndex
+		}
+		// The tail holds at most one chunk's worth of this channel.
+		if sp.partialN > sp.nPerChunk {
+			return 0, errIndex
+		}
+		// A parse gives the tail the chunk's stride (the interleaved row, the
+		// DAQmx raw width, or the type size).
+		if !sp.str && sp.partialStride != sp.stride {
+			return 0, errIndex
+		}
 		// The partial tail is addressed from partialPos with its own column and
-		// stride; its walk must end inside the file.
+		// stride. Its walk must stay inside the tail region of its own segment.
 		end, err := strideExtent(sp.partialCol, sp.partialStride, sp.partialN, int64(sp.typeSize))
 		if err != nil {
 			return 0, errIndex
 		}
 		tail, err := add64(sp.partialPos, end)
-		if err != nil || tail > size {
+		if err != nil {
 			return 0, errIndex
+		}
+		if err := partialInSegment(sp, sp.partialPos, tail, size); err != nil {
+			return 0, err
 		}
 	}
 	return samples, nil
+}
+
+// partialInSegment bounds a partial tail [from, to) by its segment. A parse
+// makes a partial tail only for the final segment of a file that is not
+// finished (live: the incomplete sentinel, or a lenient past-EOF segment),
+// whose raw data runs to EOF. The tail starts after the span's whole chunks
+// and is shorter than one chunk. A span that breaks any of that comes from a
+// crafted sidecar and would read the next segment's lead-in or an earlier
+// segment's samples, so it is a decode error.
+func partialInSegment(sp span, from, to, size int64) error {
+	if !sp.live || sp.chunkSize <= 0 {
+		return errIndex
+	}
+	whole, err := mul64(sp.nChunks, sp.chunkSize)
+	if err != nil {
+		return errIndex
+	}
+	base, err := add64(sp.dataPos, whole)
+	if err != nil {
+		return errIndex
+	}
+	if from < base || to > size || to-base >= sp.chunkSize {
+		return errIndex
+	}
+	return nil
 }
 
 // strideExtent is the byte just past the last sample of a strided walk of n
