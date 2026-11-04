@@ -79,10 +79,10 @@
 // whole axis and returns ErrMonotonic on any backwards step. ReadWindow and
 // ReadMany decode only the samples the window needs (see Reads and memory),
 // so a backwards step lying entirely outside the window may not be reported.
-// Equal timestamps are kept in file order. Across files they follow the overlap policy, since
-// a repeated time is not a positive increment. Gaps are recorded only when the
-// previous file has a positive Dt and the next kept sample falls after last+dt.
-// Y is not filled with NaN.
+// Equal timestamps are kept in file order. Across files they follow the
+// overlap policy, since a repeated time is not a positive increment. Gaps are
+// recorded only when the previous file has a positive Dt and the next kept
+// sample falls after last+dt. Y is not filled with NaN.
 //
 // # Names
 //

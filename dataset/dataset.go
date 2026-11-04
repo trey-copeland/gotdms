@@ -723,7 +723,8 @@ func (d *Dataset) ReadWindow(sel Selector, start, end time.Time, opts ...ReadOpt
 // ReadMany reads each selector over the same half-open window [start, end).
 // Every series uses one basis: WithReadBasis if passed, otherwise the dataset
 // basis. The result order matches sels. One untimed selector fails the call
-// with ErrUntimed.
+// with ErrUntimed. Like ReadWindow, it reports ErrMonotonic only for a
+// backwards step among the samples it decodes; see ReadWindow.
 //
 // Channels that share a file are read from one open. A timestamp channel used
 // by several of those channels is decoded once per call. Concurrency is
