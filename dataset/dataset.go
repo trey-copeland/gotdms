@@ -789,12 +789,27 @@ func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis 
 	// times, so its pieces must be merged latest-start first. Ordering them
 	// ascending, as for a positive increment, makes the overlap/gap pass walk
 	// backwards: files get dropped or the merged Times come out non-monotonic.
-	descending := false
+	// Pieces that disagree on the sign of their increment do not share one
+	// time axis: merging an ascending file with a descending one produces a
+	// non-monotonic series with a bogus gap. A Dt of 0 (a single-sample file,
+	// or an irregular declared clock) has no direction and fits either.
+	descending, ascending := false, false
 	for i := range pieces {
+		if !pieces[i].timed {
+			continue
+		}
 		if pieces[i].dt < 0 {
 			descending = true
-			break
+		} else if pieces[i].dt > 0 {
+			ascending = true
 		}
+	}
+	if descending && ascending {
+		name, group := sel.Name, sel.Group
+		if group == "" && len(hits) > 0 {
+			group = hits[0].Group
+		}
+		return Series{}, fmt.Errorf("%w: %q group %q mixes positive and negative increments across files", ErrArgument, name, group)
 	}
 	sort.Slice(pieces, func(i, j int) bool {
 		if !pieces[i].start.Equal(pieces[j].start) {

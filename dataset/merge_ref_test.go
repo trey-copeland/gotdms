@@ -103,7 +103,7 @@ func uniformSampleDt(dts []float64) (float64, bool) {
 	}
 	dt := dts[0]
 	for _, d := range dts[1:] {
-		if d <= 0 || math.Abs(d-dt) > 1e-9*math.Max(1, math.Abs(dt)) {
+		if d == 0 || math.Abs(d-dt) > 1e-9*math.Max(1, math.Abs(dt)) {
 			return 0, false
 		}
 	}

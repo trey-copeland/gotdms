@@ -923,8 +923,11 @@ func runsDt(runs []keptRun) (float64, bool) {
 	return dt, true
 }
 
+// sameDt reports whether d is a nonzero increment equal to dt. A descending
+// merge (every dt negative) keeps its common Dt like an ascending one; finish
+// rejects pieces that disagree on the sign.
 func sameDt(d, dt float64) bool {
-	return d > 0 && math.Abs(d-dt) <= 1e-9*math.Max(1, math.Abs(dt))
+	return d != 0 && math.Abs(d-dt) <= 1e-9*math.Max(1, math.Abs(dt))
 }
 
 func runFiles(runs []keptRun) []string {
