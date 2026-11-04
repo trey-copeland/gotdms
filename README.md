@@ -84,6 +84,7 @@ go run ./cmd/gotdms info run.tdms              # groups, channels, properties, f
 go run ./cmd/gotdms info --lenient run.tdms    # open a torn file and print the size to truncate to
 go run ./cmd/gotdms convert -o run.csv run.tdms
 go run ./cmd/gotdms index run.tdms             # write a .gtdx segment-index sidecar
+go run ./cmd/gotdms defragment run.tdms        # rewrite as one contiguous segment
 ```
 
 Flags and output are in [docs/cli.md](docs/cli.md).
@@ -99,7 +100,8 @@ Flags and output are in [docs/cli.md](docs/cli.md).
 - Multi-file datasets with declared time channels, merging, windows, shared clocks (`WithSharedClock`), and values-only reads (`WithoutTimes`). [Datasets](docs/dataset.md)
 - Per-chunk count, min, max, mean, and RMS in one pass. [Reading](docs/reading.md#chunk-statistics)
 - An opt-in `.gtdx` segment-index sidecar for fast reopen of fragmented files. [Segment index](docs/segment-index.md)
-- The `gotdms` command: `info`, `convert` to CSV, and `index`. [CLI](docs/cli.md)
+- Defragmentation: rewrite a file written in many segments as one contiguous segment (`Defragment`, `DefragmentToFile`, `DefragmentFile`). [Defragment](docs/defragment.md)
+- The `gotdms` command: `info`, `convert` to CSV, `index`, and `defragment`. [CLI](docs/cli.md)
 - Read and write paths, buffers, and benchmark figures. [Performance](docs/performance.md)
 - Fuzzed, golden-tested against the NI article's hex, differentially tested against npTDMS in CI, and mutation-tested nightly. [Testing](docs/testing.md)
 

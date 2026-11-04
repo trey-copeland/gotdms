@@ -295,6 +295,48 @@ func (s *Stream) WriteInterleaved(values ...any) error {
 	return nil
 }
 
+// writeRawColumn writes one contiguous channel's column from bytes that are
+// already encoded little-endian, bypassing the value decode and re-encode that
+// Write performs. packed must hold exactly nValues samples of the channel's
+// fixed size, in the channel's declared order. It mirrors Write's ordering and
+// count checks and is used by Defragment's zero-copy fast path. Not exported:
+// the caller must hand it correctly encoded bytes.
+func (s *Stream) writeRawColumn(ch *ChannelWriter, packed []byte, nValues int) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	if s.interleaved {
+		return wrap("write", s.w.path, fmt.Errorf("%w: interleaved stream uses WriteInterleaved", ErrLayout))
+	}
+	if ch == nil || ch.ch == nil || ch.w != s.w {
+		return wrap("write", "", fmt.Errorf("%w: channel is not in this stream", ErrArgument))
+	}
+	idx := s.index(ch.ch)
+	if idx < 0 {
+		return wrap("write", ch.ch.path, fmt.Errorf("%w: channel is not in this stream", ErrArgument))
+	}
+	if active := s.active(); active != idx {
+		if active < 0 || idx < active {
+			return wrap("write", ch.ch.path, fmt.Errorf("%w: channel already has %d values", ErrArgument, s.counts[idx]))
+		}
+		return wrap("write", ch.ch.path, fmt.Errorf("%w: write %s before %s", ErrLayout, s.channels[active].path, ch.ch.path))
+	}
+	if nValues == 0 {
+		return nil
+	}
+	if nValues > s.counts[idx]-s.got[idx] {
+		return wrap("write", ch.ch.path, fmt.Errorf("%w: %d values would pass the declared %d", ErrArgument, s.got[idx]+nValues, s.counts[idx]))
+	}
+	if len(packed) != nValues*s.sizes[idx] {
+		return wrap("write", ch.ch.path, fmt.Errorf("%w: %d bytes for %d values of %d bytes", ErrArgument, len(packed), nValues, s.sizes[idx]))
+	}
+	if err := s.writeRaw(packed); err != nil {
+		return wrap("write", ch.ch.path, s.fail(err))
+	}
+	s.got[idx] += nValues
+	return nil
+}
+
 // Finish completes the segment. Every channel must have received its
 // declared count. A seekable writer patches the lead-in. A second Finish
 // after success is a no-op.
