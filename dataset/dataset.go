@@ -23,7 +23,8 @@ const (
 	// OverlapKeepFirst drops the incoming sample. This is the default.
 	OverlapKeepFirst OverlapPolicy = iota
 	// OverlapKeepLast drops already kept samples that the incoming sample
-	// replaces (their time is not strictly before the incoming time).
+	// replaces (their time is not strictly before the incoming time along
+	// the axis: earlier for a positive increment, later for a negative one).
 	OverlapKeepLast
 	// OverlapError makes the read return ErrOverlap.
 	OverlapError
@@ -149,8 +150,9 @@ type Gap struct {
 
 // Series is a merged channel read. Times is nil when Timed is false, and
 // Times and Clock are both nil for a read that passed WithoutTimes.
-// Basis is the time RelativeTimes subtracts. Dt is the shared positive
-// increment when every contributing sample has that increment, else 0.
+// Basis is the time RelativeTimes subtracts. Dt is the shared nonzero
+// increment when every contributing sample has that increment (negative for
+// a descending waveform), else 0.
 type Series struct {
 	Name        string
 	Group       string
@@ -785,10 +787,39 @@ func validateWindow(hits []Occurrence, window bool) error {
 }
 
 func (d *Dataset) finish(sel Selector, hits []Occurrence, pieces []piece, basis time.Time, cc *clockCache) (Series, error) {
+	// A descending (negative-increment) channel runs from later to earlier
+	// times, so its pieces must be merged latest-start first. Ordering them
+	// ascending, as for a positive increment, makes the overlap/gap pass walk
+	// backwards: files get dropped or the merged Times come out non-monotonic.
+	// Pieces that disagree on the sign of their increment do not share one
+	// time axis: merging an ascending file with a descending one produces a
+	// non-monotonic series with a bogus gap. A Dt of 0 (a single-sample file,
+	// or an irregular declared clock) has no direction and fits either.
+	descending, ascending := false, false
+	for i := range pieces {
+		if !pieces[i].timed {
+			continue
+		}
+		if pieces[i].dt < 0 {
+			descending = true
+		} else if pieces[i].dt > 0 {
+			ascending = true
+		}
+	}
+	if descending && ascending {
+		name, group := sel.Name, sel.Group
+		if group == "" && len(hits) > 0 {
+			group = hits[0].Group
+		}
+		return Series{}, fmt.Errorf("%w: %q group %q mixes positive and negative increments across files", ErrArgument, name, group)
+	}
 	sort.Slice(pieces, func(i, j int) bool {
 		if !pieces[i].start.Equal(pieces[j].start) {
 			if pieces[i].timed != pieces[j].timed {
 				return pieces[i].timed
+			}
+			if descending {
+				return pieces[i].start.After(pieces[j].start)
 			}
 			return pieces[i].start.Before(pieces[j].start)
 		}

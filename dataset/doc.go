@@ -81,8 +81,9 @@
 // so a backwards step lying entirely outside the window may not be reported.
 // Equal timestamps are kept in file order. Across files they follow the
 // overlap policy, since a repeated time is not a positive increment. Gaps are
-// recorded only when the previous file has a positive Dt and the next kept
-// sample falls after last+dt. Y is not filled with NaN.
+// recorded only when the previous file has a nonzero Dt and the next kept
+// sample lies beyond last+dt: after it for a positive Dt, before it for a
+// negative (descending) one. Y is not filled with NaN.
 //
 // # Names
 //
@@ -93,19 +94,22 @@
 //
 // # Merge
 //
-// Occurrences are read in time order (first kept sample, then file path). The
-// window is half-open: start <= t < end. Samples inside one file stay in file
-// order. Overlap and gap policy applies where a new file meets samples already
-// kept. OverlapKeepFirst (the default) drops an incoming sample that lies
+// Occurrences are read in time order (first kept sample, then file path),
+// latest first when the increment is negative, so a descending waveform split
+// across files merges into one descending series. The window is half-open:
+// start <= t < end. Samples inside one file stay in file order. Overlap and
+// gap policy applies where a new file meets samples already kept. OverlapKeepFirst (the default) drops an incoming sample that lies
 // inside the previous sample's span: before last+dt when dt is positive, after
 // last+dt when dt is negative, and at or before last when dt is 0.
-// OverlapKeepLast drops kept samples that the incoming sample replaces.
+// OverlapKeepLast drops kept samples that the incoming sample replaces:
+// those at or after it for a positive dt, at or before it for a negative dt.
 // OverlapError returns ErrOverlap. Times are compared at nanosecond resolution:
 // a sample within 1ns of last+dt is the next tick, not an overlap and not a
 // gap. A single-sample file has Dt 0, so the space before the next file is
 // visible in Times and is not turned into a Gap. Untimed channels that span
 // files are concatenated in file-path order. A selector whose files do not
-// share one time source returns ErrArgument.
+// share one time source returns ErrArgument, and so does one whose files
+// disagree on the sign of the increment (one ascending, one descending).
 //
 // # Reads and memory
 //

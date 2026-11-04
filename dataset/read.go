@@ -790,12 +790,13 @@ func mergePieces(pieces []piece, policy OverlapPolicy, wantTimes bool) (Series, 
 				s.Times = pieceTimes(only)
 			}
 			s.Timed = true
-			if only.dt > 0 {
+			if only.dt != 0 {
 				s.Dt = only.dt
 			}
 		}
 		return s, nil
 	}
+	desc := descendingPieces(pieces)
 	var y []float64
 	if total > 0 {
 		y = make([]float64, 0, total)
@@ -835,7 +836,7 @@ func mergePieces(pieces []piece, policy OverlapPolicy, wantTimes bool) (Series, 
 					case OverlapKeepFirst:
 						continue
 					case OverlapKeepLast:
-						for len(runs) > 0 && !lastTime(runs).Before(t) {
+						for len(runs) > 0 && !axisBefore(lastTime(runs), t, desc) {
 							y = y[:len(y)-1]
 							r := &runs[len(runs)-1]
 							r.i1--
@@ -843,7 +844,7 @@ func mergePieces(pieces []piece, policy OverlapPolicy, wantTimes bool) (Series, 
 								runs = runs[:len(runs)-1]
 							}
 						}
-						trimGaps(&gaps, runs)
+						trimGaps(&gaps, runs, desc)
 					default:
 						return Series{}, ErrArgument
 					}
@@ -923,8 +924,11 @@ func runsDt(runs []keptRun) (float64, bool) {
 	return dt, true
 }
 
+// sameDt reports whether d is a nonzero increment equal to dt. A descending
+// merge (every dt negative) keeps its common Dt like an ascending one; finish
+// rejects pieces that disagree on the sign.
 func sameDt(d, dt float64) bool {
-	return d > 0 && math.Abs(d-dt) <= 1e-9*math.Max(1, math.Abs(dt))
+	return d != 0 && math.Abs(d-dt) <= 1e-9*math.Max(1, math.Abs(dt))
 }
 
 func runFiles(runs []keptRun) []string {
@@ -943,9 +947,32 @@ func runFiles(runs []keptRun) []string {
 	return out
 }
 
-func trimGaps(gaps *[]Gap, runs []keptRun) {
+// descendingPieces reports whether the timed pieces run from later to
+// earlier times (a negative increment). finish rejects pieces that disagree
+// on the sign, so one negative increment means the whole merge descends.
+func descendingPieces(pieces []piece) bool {
+	for i := range pieces {
+		if pieces[i].timed && pieces[i].dt < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// axisBefore reports whether a comes before b along the merge's time axis:
+// earlier for an ascending axis, later for a descending one.
+func axisBefore(a, b time.Time, desc bool) bool {
+	if desc {
+		return a.After(b)
+	}
+	return a.Before(b)
+}
+
+// trimGaps drops gaps that end past the last kept sample along the axis,
+// after OverlapKeepLast removed kept samples.
+func trimGaps(gaps *[]Gap, runs []keptRun, desc bool) {
 	g := *gaps
-	for len(g) > 0 && (len(runs) == 0 || g[len(g)-1].To.After(lastTime(runs))) {
+	for len(g) > 0 && (len(runs) == 0 || axisBefore(lastTime(runs), g[len(g)-1].To, desc)) {
 		g = g[:len(g)-1]
 	}
 	*gaps = g
@@ -962,10 +989,15 @@ func overlaps(t, last time.Time, dt float64) bool {
 }
 
 func gapBetween(t, last time.Time, dt float64) bool {
-	if dt <= 0 {
-		return false
+	if dt > 0 {
+		return t.After(addDt(last, dt).Add(timeSlack))
 	}
-	return t.After(addDt(last, dt).Add(timeSlack))
+	if dt < 0 {
+		// Descending axis: the next expected instant is earlier than last.
+		// A gap is a sample earlier still than that expected step.
+		return t.Before(addDt(last, dt).Add(-timeSlack))
+	}
+	return false
 }
 
 // roundedStep is dt rounded to nanoseconds, the same rounding addDt applies.

@@ -858,6 +858,139 @@ func TestZeroAndNegativeIncrement(t *testing.T) {
 	}
 }
 
+func TestDescendingWaveformMergeKeepsAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	// Two negative-increment (descending) waveform files, the later-start one
+	// first in time. The merge must keep every sample in descending time
+	// order. Before the fix, finish() sorted pieces ascending by start, so the
+	// overlap pass walked backwards and dropped the earlier-start file.
+	writeWave(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", epoch.Add(5*time.Second), -1, []float64{5, 4, 3})
+	writeWave(t, filepath.Join(dir, "b.tdms"), "acq", "ai0", epoch.Add(2*time.Second), -1, []float64{2, 1, 0})
+	ds := openWave(t, dir)
+	s, err := ds.Read(Selector{Name: "ai0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFloats(s.Y, []float64{5, 4, 3, 2, 1, 0}) {
+		t.Fatalf("Y = %v", s.Y)
+	}
+	want := []time.Time{
+		epoch.Add(5 * time.Second), epoch.Add(4 * time.Second), epoch.Add(3 * time.Second),
+		epoch.Add(2 * time.Second), epoch.Add(1 * time.Second), epoch,
+	}
+	if !sameTimes(s.Times, want) {
+		t.Fatalf("Times = %v", s.Times)
+	}
+	if len(s.Gaps) != 0 {
+		t.Fatalf("unexpected gaps %v", s.Gaps)
+	}
+	if s.Dt != -1 {
+		t.Fatalf("Dt = %v, want -1", s.Dt)
+	}
+}
+
+func TestDescendingWaveformRecordsGap(t *testing.T) {
+	dir := t.TempDir()
+	// A hole between two descending files: file a ends at t=8s, file b starts
+	// at t=5s, so the samples at 7s and 6s are missing. gapBetween must report
+	// it; before the fix it returned false for any dt <= 0.
+	writeWave(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", epoch.Add(10*time.Second), -1, []float64{10, 9, 8})
+	writeWave(t, filepath.Join(dir, "b.tdms"), "acq", "ai0", epoch.Add(5*time.Second), -1, []float64{5, 4, 3})
+	ds := openWave(t, dir)
+	s, err := ds.Read(Selector{Name: "ai0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFloats(s.Y, []float64{10, 9, 8, 5, 4, 3}) {
+		t.Fatalf("Y = %v", s.Y)
+	}
+	if len(s.Gaps) != 1 {
+		t.Fatalf("want one gap, got %v", s.Gaps)
+	}
+	// From is after To when dt is negative (documented Gap semantics).
+	if !s.Gaps[0].From.Equal(epoch.Add(7*time.Second)) || !s.Gaps[0].To.Equal(epoch.Add(5*time.Second)) {
+		t.Fatalf("gap = %+v", s.Gaps[0])
+	}
+}
+
+func TestDescendingWaveformWindowAndReadMany(t *testing.T) {
+	dir := t.TempDir()
+	writeWave(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", epoch.Add(10*time.Second), -1, []float64{10, 9, 8})
+	writeWave(t, filepath.Join(dir, "b.tdms"), "acq", "ai0", epoch.Add(5*time.Second), -1, []float64{5, 4, 3})
+	ds := openWave(t, dir)
+	start, end := epoch.Add(3500*time.Millisecond), epoch.Add(9500*time.Millisecond)
+	wantY := []float64{9, 8, 5, 4}
+	wantT := []time.Time{epoch.Add(9 * time.Second), epoch.Add(8 * time.Second), epoch.Add(5 * time.Second), epoch.Add(4 * time.Second)}
+	check := func(what string, s Series) {
+		t.Helper()
+		if !sameFloats(s.Y, wantY) || !sameTimes(s.Times, wantT) {
+			t.Fatalf("%s: Y=%v Times=%v", what, s.Y, s.Times)
+		}
+		if s.Dt != -1 {
+			t.Fatalf("%s: Dt=%v", what, s.Dt)
+		}
+		if len(s.Gaps) != 1 || !s.Gaps[0].From.Equal(epoch.Add(7*time.Second)) || !s.Gaps[0].To.Equal(epoch.Add(5*time.Second)) {
+			t.Fatalf("%s: gaps=%+v", what, s.Gaps)
+		}
+	}
+	s, err := ds.ReadWindow(Selector{Name: "ai0"}, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("ReadWindow", s)
+	many, err := ds.ReadMany([]Selector{{Name: "ai0"}}, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("ReadMany", many[0])
+	shared, err := ds.ReadMany([]Selector{{Name: "ai0"}}, start, end, WithSharedClock())
+	if err != nil || !sameFloats(shared[0].Y, wantY) || !sameTimes(shared[0].AbsoluteTimes(), wantT) {
+		t.Fatalf("shared clock: %+v err=%v", shared, err)
+	}
+	bare, err := ds.ReadMany([]Selector{{Name: "ai0"}}, start, end, WithoutTimes())
+	if err != nil || !sameFloats(bare[0].Y, wantY) || bare[0].Times != nil || bare[0].Dt != -1 || len(bare[0].Gaps) != 1 {
+		t.Fatalf("without times: %+v err=%v", bare, err)
+	}
+	// A window inside one file opens only that file.
+	inner, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch.Add(8*time.Second), epoch.Add(10*time.Second))
+	if err != nil || !sameFloats(inner.Y, []float64{9, 8}) || len(inner.Files) != 1 {
+		t.Fatalf("inner window Y=%v files=%v err=%v", inner.Y, inner.Files, err)
+	}
+}
+
+func TestMixedIncrementSignsRejected(t *testing.T) {
+	dir := t.TempDir()
+	// One ascending and one descending file of the same channel do not share
+	// a time axis. Merging them used to return Y=[10 9 8 0 1 2] with a bogus
+	// gap and no error.
+	writeWave(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", epoch.Add(10*time.Second), -1, []float64{10, 9, 8})
+	writeWave(t, filepath.Join(dir, "b.tdms"), "acq", "ai0", epoch, 1, []float64{0, 1, 2})
+	ds := openWave(t, dir)
+	if _, err := ds.Read(Selector{Name: "ai0"}); !errors.Is(err, ErrArgument) {
+		t.Fatalf("Read err = %v", err)
+	}
+	if _, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(time.Minute)); !errors.Is(err, ErrArgument) {
+		t.Fatalf("ReadWindow err = %v", err)
+	}
+	if _, err := ds.ReadMany([]Selector{{Name: "ai0"}}, epoch, epoch.Add(time.Minute)); !errors.Is(err, ErrArgument) {
+		t.Fatalf("ReadMany err = %v", err)
+	}
+	// A window that opens only one of the files reads it normally.
+	s, err := ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(5*time.Second))
+	if err != nil || !sameFloats(s.Y, []float64{0, 1, 2}) {
+		t.Fatalf("one-file window Y=%v err=%v", s.Y, err)
+	}
+	// A single-sample file has Dt 0 and no direction, so it merges with
+	// a descending file.
+	dir2 := t.TempDir()
+	writeWave(t, filepath.Join(dir2, "a.tdms"), "acq", "ai0", epoch.Add(10*time.Second), -1, []float64{10, 9, 8})
+	writeWave(t, filepath.Join(dir2, "b.tdms"), "acq", "ai0", epoch.Add(5*time.Second), -1, []float64{5})
+	s, err = openWave(t, dir2).Read(Selector{Name: "ai0"})
+	if err != nil || !sameFloats(s.Y, []float64{10, 9, 8, 5}) {
+		t.Fatalf("descending + single sample Y=%v err=%v", s.Y, err)
+	}
+}
+
 func TestResample(t *testing.T) {
 	dir := t.TempDir()
 	writePair(t, filepath.Join(dir, "a.tdms"), "acq", "ai0", []float64{0, 1}, []float64{0, 10})
@@ -958,6 +1091,9 @@ func TestTimeSlack(t *testing.T) {
 	neg := addDt(t0, -1)
 	if overlaps(neg, t0, -1) || gapBetween(neg, t0, -1) || !overlaps(neg.Add(2*time.Nanosecond), t0, -1) {
 		t.Fatal("negative dt")
+	}
+	if gapBetween(neg.Add(-time.Nanosecond), t0, -1) || !gapBetween(neg.Add(-2*time.Nanosecond), t0, -1) {
+		t.Fatal("negative dt gap")
 	}
 }
 

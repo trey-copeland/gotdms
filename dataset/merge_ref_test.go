@@ -25,7 +25,7 @@ func refMergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
 		if only.timed && len(only.times) > 0 {
 			s.Times = only.times
 			s.Timed = true
-			if only.dt > 0 {
+			if only.dt != 0 {
 				s.Dt = only.dt
 			}
 		}
@@ -36,6 +36,20 @@ func refMergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
 	var dts []float64
 	var src []string
 	var gaps []Gap
+	// A negative increment on any timed piece makes the axis descending:
+	// "before" is later in time.
+	desc := false
+	for _, p := range pieces {
+		if p.timed && p.dt < 0 {
+			desc = true
+		}
+	}
+	before := func(a, b time.Time) bool {
+		if desc {
+			return a.After(b)
+		}
+		return a.Before(b)
+	}
 	for _, p := range pieces {
 		if len(p.y) == 0 {
 			continue
@@ -59,13 +73,13 @@ func refMergePieces(pieces []piece, policy OverlapPolicy) (Series, error) {
 					case OverlapKeepFirst:
 						continue
 					case OverlapKeepLast:
-						for len(times) > 0 && !times[len(times)-1].Before(t) {
+						for len(times) > 0 && !before(times[len(times)-1], t) {
 							times = times[:len(times)-1]
 							y = y[:len(y)-1]
 							dts = dts[:len(dts)-1]
 							src = src[:len(src)-1]
 						}
-						refTrimGaps(&gaps, times)
+						refTrimGaps(&gaps, times, desc)
 					default:
 						return Series{}, ErrArgument
 					}
@@ -103,16 +117,16 @@ func uniformSampleDt(dts []float64) (float64, bool) {
 	}
 	dt := dts[0]
 	for _, d := range dts[1:] {
-		if d <= 0 || math.Abs(d-dt) > 1e-9*math.Max(1, math.Abs(dt)) {
+		if d == 0 || math.Abs(d-dt) > 1e-9*math.Max(1, math.Abs(dt)) {
 			return 0, false
 		}
 	}
 	return dt, true
 }
 
-func refTrimGaps(gaps *[]Gap, times []time.Time) {
+func refTrimGaps(gaps *[]Gap, times []time.Time, desc bool) {
 	g := *gaps
-	for len(g) > 0 && (len(times) == 0 || g[len(g)-1].To.After(times[len(times)-1])) {
+	for len(g) > 0 && (len(times) == 0 || (!desc && g[len(g)-1].To.After(times[len(times)-1])) || (desc && g[len(g)-1].To.Before(times[len(times)-1]))) {
 		g = g[:len(g)-1]
 	}
 	*gaps = g
