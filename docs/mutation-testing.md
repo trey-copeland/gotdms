@@ -40,19 +40,19 @@ gremlins unleash \
 
 `--threshold-efficacy 0` and `--threshold-mcover 0` are the defaults. Gremlins then does not exit 10 or 11 for a low score. A crash, or a coverage run that cannot execute the tests, still exits non-zero.
 
-On an 8 vCPU cloud VM (linux/amd64, Go 1.27.3) on 2026-10-23, at `v0.2.0` (`290bb79`), that command finished in 29 minutes 11 seconds:
+On an 8 vCPU cloud VM (linux/amd64, Go 1.27.3) on 2026-11-03, with the defragmentation change (#31) and the other open review fixes (#32 to #35) applied to `main` (`e6cd0e9`), that command finished in 26 minutes 24 seconds (one run; Gremlins v0.6.0):
 
 | | |
 | --- | --- |
-| Killed | 2486 |
+| Killed | 2617 |
 | Lived | 0 |
-| Not covered | 191 |
-| Timed out | 8 |
+| Not covered | 187 |
+| Timed out | 0 |
 | Not viable | 0 |
 | Test efficacy | 100.00% |
-| Mutant coverage | 92.87% |
+| Mutant coverage | 93.33% |
 
-Efficacy is killed / (killed + lived). Nothing lived, so no tests were added for this run. The eight timed-out mutants are in `tail.go` (four), `scale.go` (three), and `reader.go` (one); they have not been triaged. The full root package was fast enough to run as a whole; it was not split per file.
+Efficacy is killed / (killed + lived). Nothing lived. The run has 131 more killed mutants than the `v0.2.0` run (`290bb79`, 2026-10-23: 2486 killed, 0 lived, 191 not covered, 8 timed out, 29 minutes 11 seconds), from `defrag.go` and `stream.go` and the `segindex.go` and `writer.go` fixes. It finished sooner than the `v0.2.0` run on a VM of the same size; wall time varies between VMs, so compare the counts, not the times. None of the eight mutants that timed out at `v0.2.0` timed out here. The full root package was fast enough to run as a whole; it was not split per file.
 
 ### The dataset package
 
@@ -94,7 +94,7 @@ Gremlins only executes a mutant whose line is already covered.
 - `KILLED` means a test failed on the mutated code. The suite noticed.
 - `LIVED` is a survivor. The tests ran and passed. That is the line to triage.
 - `NOT COVERED` means no test executes that expression, so Gremlins does not run it. It lowers mutant coverage. It is not a survivor, and it does not lower efficacy.
-- `TIMED OUT` means the mutant exceeded the per-mutant timeout. On this package that is about four times the coverage run (about 17 seconds in the run above, whose coverage run took 4.2 seconds). It usually means the mutant hung, or the machine was slower than the coverage measurement. It is not a `LIVED` result. The run above had eight.
+- `TIMED OUT` means the mutant exceeded the per-mutant timeout. On this package that is about four times the coverage run (about 20 seconds in the run above, whose coverage run took 5.1 seconds). It usually means the mutant hung, or the machine was slower than the coverage measurement. It is not a `LIVED` result. The run above had none; the `v0.2.0` run had eight, in `tail.go` (four), `scale.go` (three), and `reader.go` (one), which were not triaged.
 - `NOT VIABLE` means the mutant did not compile. Gremlins leaves those out of the efficacy math.
 
 A survivor is only a `LIVED` row. In `gremlins-report.json` that is `"status": "LIVED"`. The log line looks like:
@@ -109,6 +109,6 @@ Triage each one:
 2. An equivalent mutant: no test can kill it, because the mutated program does the same thing. Leave the code, and write down the one-line reason.
 3. Dead or wrong code: change the library only when the change is clearly a bug, and add a regression test.
 
-Stop when what remains is equivalent, or the next test would only pin a change nothing can observe. Do not chase a mutant-coverage number. Of the 191 not-covered mutants in the run above, 47 are in `testdata/nptdms/roundtrip.go` (see above). The other 144 are spread over `value.go` (23), `waveform.go` (22), `reader.go` (20), `timestamp.go` (14), `fastwrite.go` (14), and a few other files: mostly per-type scalar decode and encode loops that the bulk path bypasses on a little-endian host (including the big-endian stores in `fastwrite.go`), range checks in property conversion, and defensive branches the suite does not enter.
+Stop when what remains is equivalent, or the next test would only pin a change nothing can observe. Do not chase a mutant-coverage number. Of the 187 not-covered mutants in the run above, 47 are in `testdata/nptdms/roundtrip.go` (see above). The other 140 are spread over `value.go` (23), `waveform.go` (22), `reader.go` (19), `timestamp.go` (14), `fastwrite.go` (14), `multiread.go` (10), and a few other files: mostly per-type scalar decode and encode loops that the bulk path bypasses on a little-endian host (including the big-endian stores in `fastwrite.go`), range checks in property conversion, and defensive branches the suite does not enter.
 
-The nightly job uploads `gremlins-report.json` as the `gremlins-report` artifact, including when the step fails. The job limit is 90 minutes (`timeout-minutes: 90`). The measured run above took 29 minutes with four workers on an 8 vCPU VM; a GitHub-hosted runner may be slower, so the limit leaves room. If a later run starts printing `TIMED OUT` for mutants that are not hangs, raise `--timeout-coefficient` rather than treating those rows as gaps. If the root package grows past the job limit, narrow `--exclude-files` or split the run by file and say which files ran.
+The nightly job uploads `gremlins-report.json` as the `gremlins-report` artifact, including when the step fails. The job limit is 90 minutes (`timeout-minutes: 90`). The measured run above took 26 minutes with four workers on an 8 vCPU VM; a GitHub-hosted runner may be slower, so the limit leaves room. If a later run starts printing `TIMED OUT` for mutants that are not hangs, raise `--timeout-coefficient` rather than treating those rows as gaps. If the root package grows past the job limit, narrow `--exclude-files` or split the run by file and say which files ran.
