@@ -387,6 +387,12 @@ func (ch *wChannel) retainView(view []byte, n int) {
 
 // Flush writes the current segment. It is a no-op when nothing has changed
 // and a segment has already been written.
+//
+// A failed segment write leaves the writer unusable: later Write, Flush,
+// Sync, and Stream calls return that error, and Close returns it without
+// writing anything more. Part of the segment may already be in the
+// underlying writer, so retrying would append a second copy. This covers a
+// failure before any byte is written as well (an internal size check).
 func (w *Writer) Flush() error {
 	if err := w.busy(); err != nil {
 		return wrap("flush", w.path, err)
@@ -418,15 +424,6 @@ func (w *Writer) Flush() error {
 		}
 	}
 	if err := w.writeSegment(toc, meta, data, rawSize); err != nil {
-		// A segment write can fail after bytes have reached the underlying
-		// writer (a patchNext seek, or the final buffer flush) with w.pos still
-		// at the segment start and the channel data not reset. Poison the
-		// writer so a later Flush or Close does not append a second copy and
-		// corrupt the file. The sync path already sets sticky; this covers the
-		// non-sync path and any pre-sync failure.
-		if w.sticky == nil {
-			w.sticky = err
-		}
 		return wrap("flush", w.path, err)
 	}
 	w.started = true
@@ -565,7 +562,23 @@ func (w *Writer) writeEmpty() error {
 	return nil
 }
 
+// writeSegment writes one buffered segment. Any error poisons the writer.
+// A segment write can fail after bytes have reached the underlying writer (a
+// patchNext seek, or the final buffer flush) with w.pos still at the segment
+// start and the channel data not reset, so a later Flush or Close would append
+// a second copy and corrupt the file. Flush and writeEmpty both come through
+// here, so neither can retry a half-written segment. The size checks below
+// fail before any byte is written; they poison the writer too, because they
+// mean the writer's own state is inconsistent.
 func (w *Writer) writeSegment(toc uint32, meta []byte, data []*wChannel, rawSize int64) error {
+	err := w.writeSegmentBytes(toc, meta, data, rawSize)
+	if err != nil && w.sticky == nil {
+		w.sticky = err
+	}
+	return err
+}
+
+func (w *Writer) writeSegmentBytes(toc uint32, meta []byte, data []*wChannel, rawSize int64) error {
 	if rawSize < 0 {
 		return ErrCorrupt
 	}
