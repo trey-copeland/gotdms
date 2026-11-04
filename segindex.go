@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -209,6 +210,27 @@ func (f *File) statData() (dataStat, error) {
 	return dataStat{fi: fi, dev: dev, ino: ino}, nil
 }
 
+// readFileLimited reads path, returning at most limit bytes. A file larger
+// than limit (for example a cache file that grew between its stat and this
+// read) yields a nil slice and no error, so the caller treats it as an
+// unusable sidecar instead of loading it in full. This caps the read even
+// when the on-disk size changed after the size check that gated the call.
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	blob, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(blob)) > limit {
+		return nil, nil
+	}
+	return blob, nil
+}
+
 func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, pre dataStat) bool {
 	data := f.dataPath()
 	fi := pre.fi
@@ -225,7 +247,7 @@ func (f *File) trySegmentIndex(sidecar string, trustIdentity bool, pre dataStat)
 	if err != nil || sf.Size() == 0 || sf.Size() > segmentIndexLimit {
 		return false
 	}
-	blob, err := os.ReadFile(sidecar)
+	blob, err := readFileLimited(sidecar, segmentIndexLimit)
 	if err != nil {
 		return false
 	}
@@ -422,7 +444,7 @@ func SegmentIndexValid(path string, opts ...ReaderOption) (bool, error) {
 	if sf.Size() == 0 || sf.Size() > segmentIndexLimit {
 		return false, nil
 	}
-	blob, err := os.ReadFile(side)
+	blob, err := readFileLimited(side, segmentIndexLimit)
 	if err != nil {
 		return false, wrap("index", side, err)
 	}
@@ -490,7 +512,12 @@ func segmentFingerprint(r interface {
 		}
 		_, _ = h.Write(hdr[:])
 		if lead.raw > 0 {
-			if lead.raw > uint64(size) {
+			// segmentBounds has already checked that the metadata ends inside
+			// this segment and inside the file (dataPos <= segEnd <= size), so
+			// lead.raw <= segEnd-pos-leadInSize and the allocation below is
+			// bounded by the segment, not the declared length. The check is
+			// repeated here so the bound does not depend on that helper.
+			if lead.raw > uint64(segEnd-pos-leadInSize) {
 				return 0, ErrCorrupt
 			}
 			meta := make([]byte, lead.raw)
@@ -938,8 +965,21 @@ func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 				return 0, errIndex
 			}
 		}
-		if sp.partialN > 0 && (sp.partialPos < 0 || sp.partialPos > size) {
-			return 0, errIndex
+		if sp.partialN > 0 {
+			if sp.partialPos < 0 || sp.partialPos > size {
+				return 0, errIndex
+			}
+			// A partial string tail is one whole offset table and payload.
+			if sp.partialN != sp.nPerChunk {
+				return 0, errIndex
+			}
+			tail, err := add64(sp.partialPos, sp.strSize)
+			if err != nil {
+				return 0, errIndex
+			}
+			if err := partialInSegment(sp, sp.partialPos, tail, size); err != nil {
+				return 0, err
+			}
 		}
 		return samples, nil
 	}
@@ -954,11 +994,92 @@ func spanInFile(sp span, runs []spanRun, size int64) (int64, error) {
 		if sp.nPerChunk > 1 && sp.stride <= 0 {
 			return 0, errIndex
 		}
+		// The per-chunk strided walk must stay inside one chunk. Otherwise a
+		// read addresses the next chunk, or runs past EOF for the last chunk,
+		// returning unrelated bytes on a large file. A fresh parse builds this
+		// invariant from the real layout; a sidecar supplies col, stride, and
+		// nPerChunk untrusted, so it is re-checked here.
+		if sp.nChunks > 0 && sp.nPerChunk > 0 {
+			end, err := strideExtent(sp.col, sp.stride, sp.nPerChunk, int64(sp.typeSize))
+			if err != nil || end > sp.chunkSize {
+				return 0, errIndex
+			}
+		}
 	}
-	if sp.partialN > 0 && (sp.partialPos < 0 || sp.partialPos > size) {
-		return 0, errIndex
+	if sp.partialN > 0 {
+		if sp.partialPos < 0 || sp.partialPos > size {
+			return 0, errIndex
+		}
+		if sp.partialN > 1 && sp.partialStride <= 0 {
+			return 0, errIndex
+		}
+		// The tail holds at most one chunk's worth of this channel.
+		if sp.partialN > sp.nPerChunk {
+			return 0, errIndex
+		}
+		// A parse gives the tail the chunk's stride (the interleaved row, the
+		// DAQmx raw width, or the type size).
+		if !sp.str && sp.partialStride != sp.stride {
+			return 0, errIndex
+		}
+		// The partial tail is addressed from partialPos with its own column and
+		// stride. Its walk must stay inside the tail region of its own segment.
+		end, err := strideExtent(sp.partialCol, sp.partialStride, sp.partialN, int64(sp.typeSize))
+		if err != nil {
+			return 0, errIndex
+		}
+		tail, err := add64(sp.partialPos, end)
+		if err != nil {
+			return 0, errIndex
+		}
+		if err := partialInSegment(sp, sp.partialPos, tail, size); err != nil {
+			return 0, err
+		}
 	}
 	return samples, nil
+}
+
+// partialInSegment bounds a partial tail [from, to) by its segment. A parse
+// makes a partial tail only for the final segment of a file that is not
+// finished (live: the incomplete sentinel, or a lenient past-EOF segment),
+// whose raw data runs to EOF. The tail starts after the span's whole chunks
+// and is shorter than one chunk. A span that breaks any of that comes from a
+// crafted sidecar and would read the next segment's lead-in or an earlier
+// segment's samples, so it is a decode error.
+func partialInSegment(sp span, from, to, size int64) error {
+	if !sp.live || sp.chunkSize <= 0 {
+		return errIndex
+	}
+	whole, err := mul64(sp.nChunks, sp.chunkSize)
+	if err != nil {
+		return errIndex
+	}
+	base, err := add64(sp.dataPos, whole)
+	if err != nil {
+		return errIndex
+	}
+	if from < base || to > size || to-base >= sp.chunkSize {
+		return errIndex
+	}
+	return nil
+}
+
+// strideExtent is the byte just past the last sample of a strided walk of n
+// samples: col + (n-1)*stride + typeSize, overflow-checked. The walk fits a
+// region of w bytes when the extent is <= w.
+func strideExtent(col, stride, n, typeSize int64) (int64, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	reach, err := mul64(n-1, stride)
+	if err != nil {
+		return 0, err
+	}
+	end, err := add64(col, reach)
+	if err != nil {
+		return 0, err
+	}
+	return add64(end, typeSize)
 }
 
 // spanExtent reports whether the chunk region that starts at dataPos lies
