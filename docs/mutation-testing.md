@@ -1,8 +1,8 @@
 # Mutation testing
 
-[Gremlins](https://github.com/go-gremlins/gremlins) v0.6.0 (Apache-2.0) mutation-tests the core package, which is the module root. It is a dev and CI tool. It is not a `go.mod` dependency. The module stays `go 1.22` with no `require` block.
+[Gremlins](https://github.com/go-gremlins/gremlins) v0.6.0 (Apache-2.0) mutation-tests the core package, which is the module root, and the `dataset` package. It is a dev and CI tool. It is not a `go.mod` dependency. The module stays `go 1.22` with no `require` block.
 
-This is a periodic quality check. [`.github/workflows/run-mutation-testing.yml`](../.github/workflows/run-mutation-testing.yml) runs at 06:00 UTC and when someone starts it by hand (`workflow_dispatch`). It does not run on pull requests. [Build and test Go module](../.github/workflows/build-and-test-go-module.yml) is the pull-request gate: its jobs are the checks the `main` ruleset requires (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+This is a periodic quality check. [`.github/workflows/run-mutation-testing.yml`](../.github/workflows/run-mutation-testing.yml) runs at 06:00 UTC and when someone starts it by hand (`workflow_dispatch`). It has two parallel jobs, `gremlins (core package)` and `gremlins (dataset package)`, each with its own report artifact (`gremlins-report` and `gremlins-report-dataset`). It does not run on pull requests. [Build and test Go module](../.github/workflows/build-and-test-go-module.yml) is the pull-request gate: its jobs are the checks the `main` ruleset requires (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ## Install
 
@@ -53,6 +53,39 @@ On an 8 vCPU cloud VM (linux/amd64, Go 1.27.3) on 2026-10-23, at `v0.2.0` (`290b
 | Mutant coverage | 92.87% |
 
 Efficacy is killed / (killed + lived). Nothing lived, so no tests were added for this run. The eight timed-out mutants are in `tail.go` (four), `scale.go` (three), and `reader.go` (one); they have not been triaged. The full root package was fast enough to run as a whole; it was not split per file.
+
+### The dataset package
+
+The second job mutates only `dataset/`. From the module root:
+
+```bash
+gremlins unleash \
+  --exclude-files '^[^/]+\.go$' \
+  --exclude-files '^cmd/' \
+  --exclude-files '^examples/' \
+  --exclude-files '^testdata/' \
+  --workers 4 \
+  --test-cpu 1 \
+  --timeout-coefficient 4 \
+  --threshold-efficacy 0 \
+  --threshold-mcover 0 \
+  --output gremlins-report-dataset.json \
+  --output-statuses lct
+```
+
+`'^[^/]+\.go$'` excludes every file in the module root, which is the core package. On the same 8 vCPU VM on 2026-11-03, with the descending-merge fix (PR #34) applied to `e6cd0e9`, the run took 31 seconds (one run, so treat it as a size, not a benchmark):
+
+| | |
+| --- | --- |
+| Killed | 550 |
+| Lived | 0 |
+| Not covered | 13 |
+| Timed out | 0 |
+| Not viable | 0 |
+| Test efficacy | 100.00% |
+| Mutant coverage | 97.69% |
+
+The 13 not-covered mutants are error paths and edge guards in `dataset.go` and `read.go` that the tests do not reach: a timestamp read error, span overflow, a timestamp that does not fit in `time.Time`, a clamp on a short slice, a cursor error, a step rounding branch, and a zero-length resample span. None is in the descending-merge code.
 
 ## How to read the report
 

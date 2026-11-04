@@ -1,9 +1,10 @@
-# Nightly mutation test of the core package (the module root).
+# Nightly mutation test of the core package (the module root) and of the
+# dataset package, as two parallel jobs.
 # This does not run on pull requests. .github/workflows/build-and-test-go-module.yml
 # is the pull-request gate. A survived mutant is reported; it does not fail this job.
 # Gremlins is a CI tool only. It is not a dependency of the gotdms module.
 
-name: 'Run mutation testing on the core package'
+name: 'Run mutation testing on the core and dataset packages'
 
 on:
   schedule:
@@ -68,7 +69,8 @@ jobs:
         # in gremlins-report.json. A coverage failure or a Gremlins crash
         # still fails this step. continue-on-error is not set, because
         # that would also hide those failures.
-        # dataset/, cmd/, and examples/ are other packages.
+        # dataset/, cmd/, and examples/ are other packages. dataset/ has
+        # its own job below.
         run: |
           gremlins unleash \
             --exclude-files '^dataset/' \
@@ -87,4 +89,65 @@ jobs:
         with:
           name: gremlins-report
           path: gremlins-report.json
+          if-no-files-found: warn
+
+  mutation-dataset:
+    name: gremlins (dataset package)
+    runs-on: ubuntu-latest
+    # The dataset package is about 550 mutants; a local run on 8 vCPUs
+    # took under a minute, so 30 minutes leaves a wide margin.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Gremlins v0.6.0
+        # Manual install from https://gremlins.dev/0.6/install/ (Linux tarball).
+        # Pinned to v0.6.0. Do not use @latest. Apache-2.0.
+        # v0.6.0's go.mod says `go 1.25`, so `go install` needs a newer
+        # toolchain than this module. The release binary runs the tests
+        # with the Go from go.mod. The checksum is the linux/amd64 line
+        # of that release's checksums.txt.
+        run: |
+          set -euo pipefail
+          version=0.6.0
+          archive="gremlins_${version}_linux_amd64.tar.gz"
+          url="https://github.com/go-gremlins/gremlins/releases/download/v${version}/${archive}"
+          curl -fsSL -o "$archive" "$url"
+          echo "b02a42e47935f891c9a411d68c07e211c7082609e79c2435b67c85ee9658c538  ${archive}" | sha256sum -c
+          tar -xzf "$archive" gremlins
+          dest="${RUNNER_TEMP}/gremlins-bin"
+          mkdir -p "$dest"
+          mv gremlins "$dest/gremlins"
+          chmod 755 "$dest/gremlins"
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/gremlins" --version
+      - name: Unleash on the dataset package
+        # Same flags as the core job. Only dataset/ is mutated: the root
+        # package files ('^[^/]+\.go$'), cmd/, examples/, and testdata/ are
+        # excluded. The dataset tests kill its mutants.
+        run: |
+          gremlins unleash \
+            --exclude-files '^[^/]+\.go$' \
+            --exclude-files '^cmd/' \
+            --exclude-files '^examples/' \
+            --exclude-files '^testdata/' \
+            --workers 4 \
+            --test-cpu 1 \
+            --timeout-coefficient 4 \
+            --threshold-efficacy 0 \
+            --threshold-mcover 0 \
+            --output gremlins-report-dataset.json \
+            --output-statuses lct
+      - name: Upload Gremlins report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gremlins-report-dataset
+          path: gremlins-report-dataset.json
           if-no-files-found: warn
