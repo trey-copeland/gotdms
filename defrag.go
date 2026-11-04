@@ -63,6 +63,10 @@ func Defragment(dst io.Writer, src io.ReaderAt, opts ...ReaderOption) error {
 // the old one and handles already open on it keep the old content, and the
 // owner is not copied. The new file takes the permission bits of an existing
 // dstPath, or of srcPath when dstPath does not exist.
+//
+// On Windows the rename cannot replace a dstPath that is read-only or that
+// another process holds open without delete sharing; the call then returns
+// the rename error, leaves dstPath as it was, and removes the temporary file.
 func DefragmentToFile(dstPath, srcPath string, opts ...ReaderOption) error {
 	return defragmentPath(dstPath, srcPath, opts)
 }
