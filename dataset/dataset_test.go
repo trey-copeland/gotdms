@@ -375,6 +375,12 @@ func TestNonMonotonic(t *testing.T) {
 	if err != nil || !sameFloats(narrow.Y, []float64{1}) {
 		t.Fatalf("narrow window Y=%v err=%v", narrow.Y, err)
 	}
+	// ReadMany has the same documented scope: a window that misses the
+	// backwards step returns its samples and no error.
+	many, err := ds.ReadMany([]Selector{{Name: "ai0"}}, epoch, epoch.Add(500*time.Millisecond))
+	if err != nil || len(many) != 1 || !sameFloats(many[0].Y, []float64{1}) || len(many[0].Times) != 1 || !many[0].Times[0].Equal(epoch) {
+		t.Fatalf("narrow ReadMany = %+v err=%v", many, err)
+	}
 	_, err = ds.ReadWindow(Selector{Name: "ai0"}, epoch, epoch.Add(5*time.Second))
 	if !errors.Is(err, ErrMonotonic) {
 		t.Fatalf("wide window err = %v", err)
