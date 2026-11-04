@@ -4,6 +4,11 @@ The Go module proxy learns about a version only after a `vX.Y.Z` tag is pushed t
 
 ## Unreleased
 
+### Fixed
+
+- A failed segment write (a buffered `Flush`, or the root-only segment of an empty writer) now leaves the `Writer` unusable, as a failed fsync already did. Part of the segment could already be in the underlying writer, and the next `Flush` or `Close` wrote it a second time and corrupted the file. Later `Write`, `Flush`, `Sync`, and `Stream` calls now return the first error, and `Close` returns it without writing. This includes the internal size checks that fail before any byte is written.
+- `Close` on a nil `*Writer` returns `ErrArgument` instead of panicking, like `Flush` and `Sync`.
+
 ## v0.2.0 (2026-10-23)
 
 `v0.2.0` is the changes since `v0.1.2` (`8d2f134`).
