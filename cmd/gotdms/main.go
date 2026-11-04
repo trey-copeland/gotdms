@@ -62,11 +62,12 @@ combined. The exit status is non-zero when any file fails.
 defragment rewrites a file so each channel's raw data is contiguous and the
 per-segment overhead collapses into a single segment, which makes later reads
 faster. Values, channel structure and order, data types, and final property
-values are unchanged. Output is little-endian TDMS 2.0. With no -o the file is
-rewritten in place through a temporary file renamed over the original, so an
-interrupted run leaves either the old file or the new one. -o writes the copy
-elsewhere and leaves the input untouched. A file with DAQmx raw data or a
-big-endian segment is rejected, because this tool does not write those layouts.
+values are unchanged. Output is little-endian TDMS 2.0. The copy is written to
+a temporary file, fsynced, and renamed over the destination: the input itself
+with no -o, or the -o path. On any error the destination is left as it was.
+-o leaves the input untouched unless it names the input. A file with DAQmx raw
+data or a big-endian segment is rejected, because this tool does not write
+those layouts.
 `
 
 func run(args []string, stdout, stderr io.Writer) int {

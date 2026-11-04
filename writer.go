@@ -120,6 +120,11 @@ type wChannel struct {
 	aliased bool // raw aliases a caller slice; do not reslice it
 	strs    []string
 	n       int
+	// keepType makes the first segment that names this channel give it a
+	// raw-data index with a count of 0 when it has no values, so a reader
+	// sees its data type instead of a void channel. Defragment sets it for a
+	// typed source channel with zero samples.
+	keepType bool
 }
 
 // GroupWriter is the write handle for one group.
@@ -765,6 +770,11 @@ func (w *Writer) buildMetaBody(data []*wChannel, hasRaw bool) ([]byte, uint32, [
 				mode = idxFull
 			}
 			indexes[ch.path] = cur
+		} else if ch.keepType && !ch.obj.emitted {
+			// Zero values, but the type is named: a full index with count 0.
+			// It adds no raw bytes and is not kept in indexes, so a later
+			// segment does not treat it as the previous layout.
+			mode = idxFull
 		} else if !hasRaw {
 			if _, had := w.prevIndex[ch.path]; had {
 				mode = idxMatch

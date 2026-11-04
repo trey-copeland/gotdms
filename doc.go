@@ -119,13 +119,15 @@
 // Defragment, DefragmentToFile, and DefragmentFile rewrite a file that was
 // written in many segments as one contiguous segment, so later reads are
 // faster. This matches NI LabVIEW's TDMS Defragment: the channel tree, order,
-// types, values, and final property values are unchanged. A file whose data
+// types, values, and final property values are unchanged (a channel that never
+// had a type stays void). A file whose data
 // channels are all fixed-size is copied byte for byte through a declared-count
 // Stream, with no value decode and memory bounded by one read batch per
 // channel; a file with a string channel is buffered. DAQmx raw data returns
 // ErrDAQmx and a big-endian segment returns ErrUnsupported, because this
-// package writes neither. DefragmentFile rewrites in place through a temporary
-// file renamed over the original.
+// package writes neither. DefragmentToFile and DefragmentFile write a
+// temporary file, fsync it, and rename it over the destination, so an error
+// leaves the destination as it was.
 //
 // Files are little-endian, version 4713 (TDMS 2.0). Big-endian segments are
 // accepted on read. DAQmx raw data (kTocDAQmxRawData, index words 0x00001269,

@@ -11,7 +11,7 @@ import (
 func runDefragment(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("defragment", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	outPath := fs.String("o", "", "write the defragmented copy here; rewrite the input in place when empty")
+	outPath := fs.String("o", "", "write the defragmented copy here (replacing it); rewrite the input in place when empty")
 	lenient := fs.Bool("lenient", false, "recover a file that ends in a torn tail or a final segment past EOF")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "usage: gotdms defragment [-o out.tdms] [--lenient] file.tdms\n")
@@ -30,8 +30,11 @@ func runDefragment(args []string, stdout, stderr io.Writer) int {
 		opts = append(opts, tdms.WithLenientTail())
 	}
 
+	// DefragmentToFile writes through a temporary file and a rename, so -o
+	// naming the input (by any spelling, or through a link) is an in-place
+	// rewrite, not a truncation of the file being read.
 	var err error
-	if *outPath == "" || *outPath == path {
+	if *outPath == "" {
 		err = tdms.DefragmentFile(path, opts...)
 	} else {
 		err = tdms.DefragmentToFile(*outPath, path, opts...)

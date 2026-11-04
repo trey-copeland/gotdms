@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -93,5 +94,41 @@ func TestDefragmentCLIUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"defragment"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("code %d, want 2", code)
+	}
+}
+
+// -o naming the input by another spelling, or through a symlink, rewrites it
+// in place instead of truncating the file being read.
+func TestDefragmentCLIOutIsInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.tdms")
+	writeFragmented(t, path)
+	link := filepath.Join(dir, "link.tdms")
+	haveLink := os.Symlink(path, link) == nil
+	outs := []string{filepath.Join(dir, ".", "run.tdms")}
+	if haveLink {
+		outs = append(outs, link)
+	}
+	for _, out := range outs {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"defragment", "-o", out, path}, &stdout, &stderr); code != 0 {
+			t.Fatalf("-o %s: %d %s", out, code, stderr.String())
+		}
+		f, err := tdms.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, _ := f.Group("g")
+		c, _ := g.Channel("c")
+		v, err := c.Values()
+		f.Close()
+		if err != nil || len(v.([]float64)) != 5 || f.SegmentCount() != 1 {
+			t.Fatalf("-o %s: values %v err %v segments %d", out, v, err, f.SegmentCount())
+		}
+	}
+	if haveLink {
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("symlink replaced: %v %v", fi, err)
+		}
 	}
 }

@@ -1,8 +1,10 @@
 package tdms
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -17,7 +19,9 @@ import (
 //
 // The copy preserves the channel tree, channel order (first appearance, the
 // order the reader assigns), data types, every value, and each object's final
-// property values. Output is little-endian TDMS 2.0.
+// property values. A typed channel with zero samples keeps its type through a
+// raw-data index with a count of 0; a channel that never had a type stays
+// void. Output is little-endian TDMS 2.0.
 //
 // src must report its length the same way NewReader requires (a Size method,
 // an *os.File, or an io.Seeker). ReaderOptions are passed to the internal
@@ -26,9 +30,10 @@ import (
 //
 // A file that contains DAQmx raw data returns ErrDAQmx and a file with a
 // big-endian segment returns ErrUnsupported; this package does not write
-// either, so rewriting them would silently change the on-disk format. Nothing
-// is written to dst in those cases beyond what had already streamed; use
-// DefragmentFile or DefragmentToFile for a clean all-or-nothing result.
+// either, so rewriting them would silently change the on-disk format. That
+// check runs before the first byte is written, so a rejected file writes
+// nothing to dst. Any later error (a read or write failure) can leave a
+// partial copy in dst; DefragmentToFile and DefragmentFile never expose one.
 func Defragment(dst io.Writer, src io.ReaderAt, opts ...ReaderOption) error {
 	f, err := NewReader(src, opts...)
 	if err != nil {
@@ -38,65 +43,119 @@ func Defragment(dst io.Writer, src io.ReaderAt, opts ...ReaderOption) error {
 }
 
 // DefragmentToFile reads the TDMS file at srcPath and writes a defragmented
-// copy to dstPath. dstPath is created or truncated. See Defragment.
+// copy to dstPath. See Defragment.
+//
+// The copy is written to a temporary file in dstPath's directory, fsynced,
+// and renamed over dstPath, and the directory is then synced (best effort;
+// not on Windows). dstPath is therefore never truncated or half-written: on
+// any error, including a rejected DAQmx or big-endian file, an existing
+// dstPath is left as it was and the temporary file is removed. Because the
+// data is on stable storage before the rename, a crash or power loss leaves
+// either the old dstPath or the complete copy, on file systems that make a
+// rename durable after the data it names (common local file systems; not
+// guaranteed on network file systems, or on Windows, whose directory cannot
+// be synced).
+//
+// dstPath may name srcPath, including through a different relative path, a
+// symbolic link, or a hard link; that is an in-place rewrite, as with
+// DefragmentFile. A symbolic link at dstPath is followed, so its target is
+// replaced and the link stays. The replacement is a new file: hard links to
+// the old one and handles already open on it keep the old content, and the
+// owner is not copied. The new file takes the permission bits of an existing
+// dstPath, or of srcPath when dstPath does not exist.
 func DefragmentToFile(dstPath, srcPath string, opts ...ReaderOption) error {
+	return defragmentPath(dstPath, srcPath, opts)
+}
+
+// DefragmentFile rewrites the TDMS file at path in place. It is
+// DefragmentToFile(path, path, opts...): the copy goes to a temporary file in
+// the same directory and is renamed over the original, so on any error the
+// original is left untouched. See DefragmentToFile for what a crash or power
+// loss leaves, and for links and permissions.
+func DefragmentFile(path string, opts ...ReaderOption) error {
+	return defragmentPath(path, path, opts)
+}
+
+func defragmentPath(dstPath, srcPath string, opts []ReaderOption) error {
 	f, err := Open(srcPath, opts...)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	out, err := os.Create(dstPath)
+	if err := defragReject(f); err != nil {
+		return err
+	}
+	target, perm, err := defragTarget(dstPath, srcPath)
 	if err != nil {
 		return wrap("defragment", dstPath, err)
 	}
-	if err := defragment(out, f); err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Close(); err != nil {
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, filepath.Base(target)+".defrag-*")
+	if err != nil {
 		return wrap("defragment", dstPath, err)
 	}
+	tmpName := tmp.Name()
+	done := false
+	defer func() {
+		if !done {
+			tmp.Close() // a second Close after a failed one is harmless
+			os.Remove(tmpName)
+		}
+	}()
+	if err := defragment(tmp, f); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil && !isUnsupportedChmod(err) {
+		return wrap("defragment", dstPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return wrap("defragment", dstPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return wrap("defragment", dstPath, err)
+	}
+	// Close the source before the rename: Windows refuses to replace a file
+	// that is open, and the source may be the destination.
+	f.Close()
+	// os.Rename replaces an existing file on every supported platform. This
+	// does not use replaceFile: its remove-and-retry fallback could delete
+	// the original and then fail.
+	if err := os.Rename(tmpName, target); err != nil {
+		return wrap("defragment", dstPath, err)
+	}
+	done = true
+	syncDir(dir)
 	return nil
 }
 
-// DefragmentFile rewrites the TDMS file at path in place. The defragmented
-// copy is written to a temporary file in the same directory and renamed over
-// the original, so an interrupted run leaves either the old file or the new
-// one, never a half-written file. If defragmentation fails the original is
-// left untouched. See Defragment.
-func DefragmentFile(path string, opts ...ReaderOption) error {
-	f, err := Open(path, opts...)
+// defragTarget resolves the path the copy replaces and the permission bits it
+// gets. A symbolic link at dstPath is followed so the link survives the
+// rename. An existing destination keeps its permission bits; a new one takes
+// the source's.
+func defragTarget(dstPath, srcPath string) (string, os.FileMode, error) {
+	target := dstPath
+	if fi, err := os.Lstat(dstPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(dstPath)
+		if err != nil {
+			return "", 0, err
+		}
+		target = resolved
+	}
+	fi, err := os.Stat(target)
+	if err == nil {
+		if !fi.Mode().IsRegular() {
+			return "", 0, fmt.Errorf("%w: destination is not a regular file", ErrArgument)
+		}
+		return target, fi.Mode().Perm(), nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", 0, err
+	}
+	sfi, err := os.Stat(srcPath)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
-	defer f.Close()
-
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".defrag-*")
-	if err != nil {
-		return wrap("defragment", path, err)
-	}
-	tmpName := tmp.Name()
-	cleanup := func() {
-		tmp.Close()
-		os.Remove(tmpName)
-	}
-	if err := defragment(tmp, f); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return wrap("defragment", path, err)
-	}
-	// The reader still has the original open; close it before the rename so
-	// Windows, which refuses to replace an open file, can complete it.
-	f.Close()
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return wrap("defragment", path, err)
-	}
-	return nil
+	return target, sfi.Mode().Perm(), nil
 }
 
 // defragment writes a single-segment copy of f to dst. f stays open for
@@ -128,11 +187,13 @@ func defragment(dst io.Writer, f *File) error {
 		for _, c := range g.Channels() {
 			cw, err := gw.Channel(c.Name(), c.DataType())
 			if err != nil {
-				w.Close()
 				return err
 			}
 			for _, p := range c.Properties() {
 				cw.ch.obj.setProp(p)
+			}
+			if c.hasDT && c.total == 0 && c.dt != TypeVoid {
+				cw.ch.keepType = true
 			}
 			if c.hasDT && c.total > 0 {
 				dataChans = append(dataChans, c)
@@ -150,16 +211,17 @@ func defragment(dst io.Writer, f *File) error {
 		return w.Close()
 	}
 
+	// On an error the writer is abandoned, not closed: Close would write a
+	// metadata segment, or the rest of a stream, after the failure. The
+	// writer holds no file of its own (dst belongs to the caller).
 	if anyString {
 		if err := defragBuffered(w, dataChans, dataWrite); err != nil {
-			w.Close()
 			return err
 		}
 		return w.Close()
 	}
 
 	if err := defragStream(w, f, dataChans, dataWrite); err != nil {
-		w.Close()
 		return err
 	}
 	return w.Close()
