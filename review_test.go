@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"math/bits"
 	"runtime"
 	"testing"
 	"time"
@@ -611,6 +612,14 @@ func TestFormatLimits(t *testing.T) {
 	binary.Write(&raw, binary.LittleEndian, samples)
 	file = fixedIndexFile(t, TypeFloat64, 1<<31, true, raw.Bytes())
 	f, err := NewReader(bytes.NewReader(file))
+	if bits.UintSize == 32 {
+		// A chunk of 2^31 values cannot be indexed with a 32-bit int, even
+		// when only three of them were written. It is refused, not wrapped.
+		if !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("32-bit 2^31-value chunk: %v, want ErrUnsupported", err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -274,6 +274,9 @@ func (c *Channel) readScaled(scale LinearScale) ([]float64, error) {
 	if c.file == nil || c.file.r == nil {
 		return nil, ErrClosed
 	}
+	if err := fitsInt(c.total, 8); err != nil {
+		return nil, err
+	}
 	n := c.Len()
 	y := make([]float64, n)
 	if n == 0 {

@@ -55,6 +55,17 @@ Other limits are in the support matrix below: big-endian segments are read and n
 
 Integer and float type codes are the usual 1–10 (`int8` through `float64`). The NI article's lead-in example labels bytes `0E 00 00 00` as mask `0x1110`. That label is the binary value `0b1110`; the bytes are the mask `0x0E` (metadata, new object list, and raw data). ToC itself is always little-endian. When `TocBigEndian` is set, every other numeric field in the segment is big-endian, including the version and both offsets in the lead-in.
 
+## Platforms
+
+gotdms is pure Go (no cgo) and builds for the platforms Go supports. CI runs the full test suite on linux/amd64 (Go 1.22 and 1.27), windows/amd64 (Go 1.22), and linux/386 (Go 1.22 and 1.27), and vets linux/arm (`GOARM=7`) and windows/386. The 32-bit job is not a required check.
+
+On a 32-bit platform (386, arm) `int` is 32 bits, so sample indexes and slice lengths stop at 2^31−1. File offsets stay `int64`, so files larger than 4 GiB still open. Past that limit the reader returns `ErrUnsupported` instead of wrapping or panicking:
+
+- At open, a channel with more than 2^31−1 values, a raw-data chunk with more values than that, or a segment whose metadata is larger than 2^31−1 bytes. A segment-index sidecar that describes such a channel is a miss, and the parse then returns the error.
+- On a read, `Values`, `Slice`, `ReadValues`, and `Group.Values` when the result would be more than 2^31−1 bytes, and `Float64s`, `Int64s`, and `ScaledWaveform` when the converted `[]float64` or `[]int64` would be. A `Cursor` or a smaller `Slice` still reads such a channel.
+
+On 64-bit platforms these limits are the `int64` limits the reader already enforces.
+
 ## Format choices
 
 A few details in the article are ambiguous. Each choice is tested.

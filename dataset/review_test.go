@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -351,8 +352,14 @@ func TestWaveformIndexWide(t *testing.T) {
 			t.Fatalf("n=%d tail bounds %d %d err=%v", n, i0, i1, err)
 		}
 	}
-	if _, err := indexToInt(int64(math.MaxInt32) + 1); err != nil && int64(int(int64(math.MaxInt32)+1)) == int64(math.MaxInt32)+1 {
+	// 2^31 fits in int on 64-bit platforms and must be rejected, not
+	// wrapped, on 32-bit ones.
+	_, err := indexToInt(int64(math.MaxInt32) + 1)
+	if bits.UintSize == 64 && err != nil {
 		t.Fatal(err)
+	}
+	if bits.UintSize == 32 && !errors.Is(err, ErrArgument) {
+		t.Fatalf("32-bit indexToInt(2^31) err = %v, want ErrArgument", err)
 	}
 }
 

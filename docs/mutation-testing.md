@@ -28,7 +28,6 @@ gremlins unleash \
   --exclude-files '^cmd/' \
   --exclude-files '^examples/' \
   --workers 4 \
-  --test-cpu 1 \
   --timeout-coefficient 4 \
   --threshold-efficacy 0 \
   --threshold-mcover 0 \
@@ -40,19 +39,19 @@ gremlins unleash \
 
 `--threshold-efficacy 0` and `--threshold-mcover 0` are the defaults. Gremlins then does not exit 10 or 11 for a low score. A crash, or a coverage run that cannot execute the tests, still exits non-zero.
 
-On an 8 vCPU cloud VM (linux/amd64, Go 1.27.3) on 2026-11-03, with the defragmentation change (#31) and the other open review fixes (#32 to #35) applied to `main` (`e6cd0e9`), that command finished in 26 minutes 24 seconds (one run; Gremlins v0.6.0):
+Do not pass `--test-cpu`. Gremlins v0.6.0 hands it to the test binary as the single argument `-cpu N`, which the binary rejects (`flag provided but not defined: -cpu 1`). Every mutant then exits 1 and is reported `KILLED`, whatever it changed. Every figure this page published before the 32-bit build fix was measured that way, so their 100% efficacy and zero lived mutants did not reflect the tests. Those figures are withdrawn.
+
+With the flag removed, Gremlins v0.6.0 was run on eight core files only (`convert.go`, `daqmx.go`, `multiread.go`, `reader.go`, `segindex.go`, `spanrun.go`, `value.go`, `waveform.go`; every other root file excluded) on an 8 vCPU VM (linux/amd64, Go 1.27.3) on 2026-11-04, with the 32-bit build fix applied to `27f7f69`. It took about 23 minutes and found real survivors:
 
 | | |
 | --- | --- |
-| Killed | 2617 |
-| Lived | 0 |
-| Not covered | 187 |
-| Timed out | 0 |
-| Not viable | 0 |
-| Test efficacy | 100.00% |
-| Mutant coverage | 93.33% |
+| Killed | 1353 |
+| Lived | 380 |
+| Not covered | 97 |
+| Timed out | 8 |
+| Test efficacy | 78.07% |
 
-Efficacy is killed / (killed + lived). Nothing lived. The run has 131 more killed mutants than the `v0.2.0` run (`290bb79`, 2026-10-23: 2486 killed, 0 lived, 191 not covered, 8 timed out, 29 minutes 11 seconds), from `defrag.go` and `stream.go` and the `segindex.go` and `writer.go` fixes. It finished sooner than the `v0.2.0` run on a VM of the same size; wall time varies between VMs, so compare the counts, not the times. None of the eight mutants that timed out at `v0.2.0` timed out here. The full root package was fast enough to run as a whole; it was not split per file.
+The lived mutants predate the 32-bit change and have not been triaged. The checks that only bind on a 32-bit build compare against the package variable `maxInt` (`intlimit.go`), and `intlimit_test.go` lowers it so an amd64 run tests each one at its boundary. Their mutants are killed. Whole-package figures will be filled in from the first nightly run without the flag.
 
 ### The dataset package
 
@@ -65,7 +64,6 @@ gremlins unleash \
   --exclude-files '^examples/' \
   --exclude-files '^testdata/' \
   --workers 4 \
-  --test-cpu 1 \
   --timeout-coefficient 4 \
   --threshold-efficacy 0 \
   --threshold-mcover 0 \
@@ -73,28 +71,16 @@ gremlins unleash \
   --output-statuses lct
 ```
 
-`'^[^/]+\.go$'` excludes every file in the module root, which is the core package. On the same 8 vCPU VM on 2026-11-03, with the descending-merge fix (PR #34) applied to `e6cd0e9`, the run took 31 seconds (one run, so treat it as a size, not a benchmark):
-
-| | |
-| --- | --- |
-| Killed | 550 |
-| Lived | 0 |
-| Not covered | 13 |
-| Timed out | 0 |
-| Not viable | 0 |
-| Test efficacy | 100.00% |
-| Mutant coverage | 97.69% |
-
-The 13 not-covered mutants are error paths and edge guards in `dataset.go` and `read.go` that the tests do not reach: a timestamp read error, span overflow, a timestamp that does not fit in `time.Time`, a clamp on a short slice, a cursor error, a step rounding branch, and a zero-length resample span. None is in the descending-merge code.
+`'^[^/]+\.go$'` excludes every file in the module root, which is the core package. Its earlier figures (550 killed, 0 lived) were measured with `--test-cpu 1` and are withdrawn for the reason above.
 
 ## How to read the report
 
-Gremlins only executes a mutant whose line is already covered.
+Gremlins only executes a mutant whose line is already covered. The per-mutant timeout is a multiple of the coverage run, so run `go clean -testcache` first locally: a cached coverage run takes milliseconds, and every mutant then times out.
 
 - `KILLED` means a test failed on the mutated code. The suite noticed.
 - `LIVED` is a survivor. The tests ran and passed. That is the line to triage.
 - `NOT COVERED` means no test executes that expression, so Gremlins does not run it. It lowers mutant coverage. It is not a survivor, and it does not lower efficacy.
-- `TIMED OUT` means the mutant exceeded the per-mutant timeout. On this package that is about four times the coverage run (about 20 seconds in the run above, whose coverage run took 5.1 seconds). It usually means the mutant hung, or the machine was slower than the coverage measurement. It is not a `LIVED` result. The run above had none; the `v0.2.0` run had eight, in `tail.go` (four), `scale.go` (three), and `reader.go` (one), which were not triaged.
+- `TIMED OUT` means the mutant exceeded the per-mutant timeout. On this package that is about four times the coverage run. It usually means the mutant hung, or the machine was slower than the coverage measurement. It is not a `LIVED` result.
 - `NOT VIABLE` means the mutant did not compile. Gremlins leaves those out of the efficacy math.
 
 A survivor is only a `LIVED` row. In `gremlins-report.json` that is `"status": "LIVED"`. The log line looks like:

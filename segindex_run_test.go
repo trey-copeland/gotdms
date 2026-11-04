@@ -2,6 +2,7 @@ package tdms
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +13,11 @@ import (
 )
 
 func TestSpanIsSingleSegmentSize(t *testing.T) {
-	if unsafe.Sizeof(span{}) != 112 {
-		t.Fatalf("span is %d bytes; a no-run file allocates one span per segment", unsafe.Sizeof(span{}))
+	// 112 bytes on 64-bit platforms. 32-bit ones pack the int fields
+	// tighter, and must not grow past the 64-bit size.
+	got := unsafe.Sizeof(span{})
+	if (bits.UintSize == 64 && got != 112) || got > 112 {
+		t.Fatalf("span is %d bytes; a no-run file allocates one span per segment", got)
 	}
 }
 

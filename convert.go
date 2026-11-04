@@ -11,6 +11,9 @@ import (
 // Integers above 2^53 are not exact in float64. Strings, timestamps, and
 // complex values return ErrType.
 func (c *Channel) Float64s() ([]float64, error) {
+	if err := fitsInt(c.total, 8); err != nil {
+		return nil, wrap("read", c.path, err)
+	}
 	v, err := c.Values()
 	if err != nil {
 		return nil, err
@@ -25,6 +28,9 @@ func (c *Channel) Float64s() ([]float64, error) {
 // Int64s reads an integer or bool channel into []int64. uint64 values above
 // math.MaxInt64 and non-integer channels return ErrType.
 func (c *Channel) Int64s() ([]int64, error) {
+	if err := fitsInt(c.total, 8); err != nil {
+		return nil, wrap("read", c.path, err)
+	}
 	v, err := c.Values()
 	if err != nil {
 		return nil, err
@@ -172,6 +178,16 @@ func toInt64s(v any) ([]int64, error) {
 	default:
 		return nil, fmt.Errorf("%w: cannot convert %T to int64", ErrType, v)
 	}
+}
+
+// fitsInt returns ErrUnsupported when n values of width bytes take more
+// than maxInt bytes. It only binds on 32-bit platforms, where the
+// []float64 or []int64 a conversion allocates could not be indexed.
+func fitsInt(n int64, width int) error {
+	if n < 0 || width <= 0 || n > int64(maxInt/width) {
+		return fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, width)
+	}
+	return nil
 }
 
 func mapNum(n int, f func(int) float64) []float64 {

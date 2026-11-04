@@ -26,7 +26,11 @@ jobs:
     runs-on: ubuntu-latest
     # 45 minutes was too short once daqmx.go landed: run 3 was cancelled
     # at the limit in writer.go. The .gtdx sidecar code adds more mutants.
-    timeout-minutes: 90
+    # Since --test-cpu was dropped every mutant runs the real suite (before,
+    # each one failed at flag parsing), so the run is much longer: about
+    # 23 minutes for 8 of the core files on an 8 vCPU VM. 180 minutes is an
+    # estimate for the whole package on a 4 vCPU runner, not a measurement.
+    timeout-minutes: 180
     steps:
       # Same checkout as build-and-test-go-module.yml. The coverage run is a
       # full `go test`, and TestSegmentIndexV010MissesVersion2 reads v0.1.0
@@ -61,6 +65,10 @@ jobs:
           echo "$dest" >> "$GITHUB_PATH"
           "$dest/gremlins" --version
       - name: Unleash on the core package
+        # No --test-cpu: Gremlins v0.6.0 passes it to the test binary as the
+        # single argument "-cpu N", which the binary rejects as an undefined
+        # flag. Every mutant then exits 1 and is reported KILLED, whatever it
+        # changed, so the run always showed 0 lived.
         # --timeout-coefficient 4 kills a mutant that runs longer than
         # 4× the coverage run, so one hang cannot stall the job.
         # --threshold-efficacy 0 and --threshold-mcover 0 are the Gremlins
@@ -77,7 +85,6 @@ jobs:
             --exclude-files '^cmd/' \
             --exclude-files '^examples/' \
             --workers 4 \
-            --test-cpu 1 \
             --timeout-coefficient 4 \
             --threshold-efficacy 0 \
             --threshold-mcover 0 \
@@ -128,6 +135,10 @@ jobs:
           echo "$dest" >> "$GITHUB_PATH"
           "$dest/gremlins" --version
       - name: Unleash on the dataset package
+        # No --test-cpu: Gremlins v0.6.0 passes it to the test binary as the
+        # single argument "-cpu N", which the binary rejects as an undefined
+        # flag. Every mutant then exits 1 and is reported KILLED, whatever it
+        # changed, so the run always showed 0 lived.
         # Same flags as the core job. Only dataset/ is mutated: the root
         # package files ('^[^/]+\.go$'), cmd/, examples/, and testdata/ are
         # excluded. The dataset tests kill its mutants.
@@ -138,7 +149,6 @@ jobs:
             --exclude-files '^examples/' \
             --exclude-files '^testdata/' \
             --workers 4 \
-            --test-cpu 1 \
             --timeout-coefficient 4 \
             --threshold-efficacy 0 \
             --threshold-mcover 0 \

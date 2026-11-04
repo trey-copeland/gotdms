@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"unsafe"
 )
 
 // splitWindow is the multiplexed byte window ReadValues holds while splitting
@@ -179,7 +180,7 @@ func spanSamples(sp *span, runs []spanRun) (int64, error) {
 	if sp.runIdx == 0 {
 		return one, nil
 	}
-	if int(sp.runIdx) >= len(runs) || runs[sp.runIdx].count <= 1 {
+	if uint64(sp.runIdx) >= uint64(len(runs)) || runs[sp.runIdx].count <= 1 {
 		return 0, ErrCorrupt
 	}
 	if sp.partialN != 0 || runs[sp.runIdx].step <= 0 || sp.str || sp.live {
@@ -205,6 +206,9 @@ func (c *Channel) readSpanInto(r io.ReaderAt, sp *span, dst any, dstSample, n in
 		}
 		normalize(c.dt, raw, sp.big)
 		return nil
+	}
+	if n < 0 || n > maxInt/sz {
+		return fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, sz)
 	}
 	buf := make([]byte, n*sz)
 	if err := sp.copyValues(c.runs, r, 0, int64(n), buf); err != nil {
@@ -342,6 +346,9 @@ func scatter(m ileaveMember, dst any, buf []byte, stride, dstSample, n int) erro
 	if n == 0 {
 		return nil
 	}
+	if m.sp.col < 0 || m.sp.col > int64(stride) {
+		return ErrCorrupt
+	}
 	col := int(m.sp.col)
 	sz := m.sp.typeSize
 	if col < 0 || sz <= 0 || stride < col+sz || len(buf) < n*stride {
@@ -362,40 +369,51 @@ func scatter(m ileaveMember, dst any, buf []byte, stride, dstSample, n int) erro
 func makeValues(dt DataType, n int) (any, error) {
 	switch dt.storage() {
 	case TypeInt8:
-		return make([]int8, n), nil
+		return makeN[int8](n)
 	case TypeInt16:
-		return make([]int16, n), nil
+		return makeN[int16](n)
 	case TypeInt32:
-		return make([]int32, n), nil
+		return makeN[int32](n)
 	case TypeInt64:
-		return make([]int64, n), nil
+		return makeN[int64](n)
 	case TypeUint8:
-		return make([]uint8, n), nil
+		return makeN[uint8](n)
 	case TypeUint16:
-		return make([]uint16, n), nil
+		return makeN[uint16](n)
 	case TypeUint32:
-		return make([]uint32, n), nil
+		return makeN[uint32](n)
 	case TypeUint64:
-		return make([]uint64, n), nil
+		return makeN[uint64](n)
 	case TypeFloat32:
-		return make([]float32, n), nil
+		return makeN[float32](n)
 	case TypeFloat64:
-		return make([]float64, n), nil
+		return makeN[float64](n)
 	case TypeComplex64:
-		return make([]complex64, n), nil
+		return makeN[complex64](n)
 	case TypeComplex128:
-		return make([]complex128, n), nil
+		return makeN[complex128](n)
 	case TypeBool:
-		return make([]bool, n), nil
+		return makeN[bool](n)
 	case TypeTimestamp:
-		return make([]Timestamp, n), nil
+		return makeN[Timestamp](n)
 	case TypeExtendedFloat:
-		return make([]Extended, n), nil
+		return makeN[Extended](n)
 	case TypeString:
-		return make([]string, n), nil
+		return makeN[string](n)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, dt)
 	}
+}
+
+// makeN allocates n values, or returns ErrUnsupported when n values would
+// take more than math.MaxInt bytes. That bound only binds on 32-bit
+// platforms, where make would otherwise panic with "len out of range".
+func makeN[T any](n int) (any, error) {
+	var zero T
+	if n < 0 || (unsafe.Sizeof(zero) > 0 && uintptr(n) > uintptr(maxInt)/unsafe.Sizeof(zero)) {
+		return nil, fmt.Errorf("%w: %d values of %d bytes exceed int", ErrUnsupported, n, unsafe.Sizeof(zero))
+	}
+	return make([]T, n), nil
 }
 
 func decodeInto(dt DataType, b []byte, dst any, at int) error {
