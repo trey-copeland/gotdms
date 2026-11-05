@@ -122,27 +122,28 @@ No production bug turned up. The survivors are missing assertions, equivalent ed
 - `nsToFraction`'s `r >= 500_000_000` never sees a remainder of exactly 500_000_000 for any nanosecond in `0..999_999_999`. The boundary edit is equivalent. `q++` is not: `Time()` still matches a fraction two units away, and the documented value is the nearest `2^-64` second. The test pins one nanosecond.
 - `seqReader`'s cache window (`off >= base` and the end `<=`) does change bytes when the underlying `ReaderAt` would return something else on a second read. That is tested. `n >= len(p)` does not matter to callers: `readFull` ignores the error once `n` fills the slice, and `io.ReaderAt` allows either `nil` or `EOF` in that case.
 - `fitsSpan` and `wordAligned` failing closed take the byte copy. The samples match. A test would only be asserting which path ran.
-- Chunk min/max updating on `x < min` is a no-op when `x == min`.
+- Chunk min/max updating on `x < min` does not change the stored value when `x == min`, except signed zero: `-0 <= +0` is true, so the boundary edit would store `-0`. Same caveat as `applyInPlace`. Not pinned.
 
 `INVERT_NEGATIVES` and `ARITHMETIC_BASE` both replace the `-` token with `+`. All 31 core `INVERT_NEGATIVES` rows are that same edit at the same column as an arithmetic row. They are one behavior counted twice.
 
 | Category | Rows | What happened |
 | --- | --- | --- |
-| Killed by tests in this change | 28 | `edges_test.go`, the multiplexed-string error text, and `dataset` is separate below |
-| Duplicate `-` to `+` left in place | 27 | The same edit as an `ARITHMETIC_BASE` row this change did not kill. 4 of the 31 duplicates are in the 28 above |
-| Equivalent for every input | 9 | `addSigned` (4), the impossible half-nanosecond remainder (1), min/max equality (2), the cursor batch shrink (1), `seqReader`'s full-slice error (1) |
-| Left | 556 | Integer extremes, I/O failures, or a second check / slow path that still returns the same result |
+| Killed by tests in this change | 30 | `edges_test.go`, the multiplexed-string error text, and `dataset` is separate below |
+| Duplicate `-` to `+` left in place | 26 | The same edit as an `ARITHMETIC_BASE` row this change did not kill. 5 of the 31 duplicates are in the 30 above |
+| Equivalent | 9 | `addSigned` (4), the impossible half-nanosecond remainder (1), min/max except signed zero (2), the cursor batch shrink (1), `seqReader`'s full-slice error (1) |
+| Left | 555 | Integer extremes, I/O failures, or a second check / slow path that still returns the same result |
 
-79 of the 556 sit on a line that compares against an integer extreme (`math.MaxInt`, `MaxUint32`, `maxInt`, and the same family). `intlimit_test.go` already kills the checks that go through the `maxInt` variable. The survivors use the constant, so the equal value is not reachable from an amd64 test without another harness. A few of those lines also have a `<= 0` guard beside the extreme; that guard fails closed into the same error or the slow path.
+79 of the 555 sit on a line that compares against an integer extreme (`math.MaxInt`, `MaxUint32`, `maxInt`, and the same family). `intlimit_test.go` already kills the checks that go through the `maxInt` variable. The survivors use the constant, so the equal value is not reachable from an amd64 test without another harness. A few of those lines also have a `<= 0` guard beside the extreme; that guard fails closed into the same error or the slow path.
 
-24 of the 556 negate `err == nil` or `err != nil` on rename, stat, write, or a read that a later check still fails. Those two groups overlap (a line can mention both an extreme and an error), so they are not a partition of the 556.
+24 of the 555 negate `err == nil` or `err != nil` on rename, stat, write, or a read that a later check still fails. Those two groups overlap (a line can mention both an extreme and an error), so they are not a partition of the 555.
 
-Files the new tests touch: `reader.go` (`CursorAt`, `Close`, empty `Slice`, `DAQmxSlice` via `readTyped`), `fastread.go` (the sequential buffer), `stream.go` (one past the values still declared), `writer.go` (int32 property bounds, and the multiplexed-string error), `value.go` (encoding `int32` / `uint32` at the type's own limits), `errors.go` (the `Error` text), `timestamp.go`.
+Files the new tests touch: `reader.go` (`CursorAt`, `Close`, empty `Slice`, a string `Slice` one past the end, `DAQmxSlice` via `readTyped`), `fastread.go` (the sequential buffer), `stream.go` (one past the values still declared), `writer.go` (int32 and uint property bounds, and the multiplexed-string error), `value.go` (encoding `int32` / `uint32` at the type's own limits), `errors.go` (the `Error` text), `timestamp.go`.
 
 Deliberately left, with the reason:
 
-- `readRangeFrom`'s `total-start` subtraction. `readTyped` repeats the same check for every `Slice`. `DAQmxSlice` calls only `readTyped`, and that one is now tested. The copy in `readRangeFrom` cannot change a result.
-- `normalizeLayout` on one string channel. Returning "interleaved" or not builds the same column offsets, and `rawByteSize` still rejects several string channels. The test now requires the "cannot be multiplexed" text, which is the check that actually explains the error. The layout flags that do not change that text are still unasserted.
+- `readRangeFrom`'s `total-start` subtraction on a numeric `Slice`. `readTyped` repeats that check, so a bad numeric range still fails. String channels, and channels with no data type, return from `readRangeFrom` before `readTyped`. `Slice(1, 2)` on a 2-value string channel now requires `ErrArgument`, which is the case `total+start` would accept.
+- Reader `normalizeLayout` on one string channel. Returning interleaved or not builds the same column offsets. Those flags are still unasserted.
+- Writer `checkInterleaved` in `writer.go`. Several string channels also fail later in `rawByteSize` with `ErrLayout`. The test requires the text "cannot be multiplexed", which is `checkInterleaved`'s error, not `normalizeLayout`.
 - `applyInPlace` skipping `y = y*1 + 0`. The values match, including every test, except that a negative zero becomes `+0` if the loop runs. Signed zero is not part of the waveform contract.
 - Deinterleave word loads, `contiguousBytes`, and `directRead`'s size cutoff. Each one selects a faster path. The byte path and the buffered path return the same values.
 - Segment-index `count`'s element size (`4+4+4+4+4+1+1` and the division). A smaller minimum still fails when the following field reads run out of bytes, and `ns > 4096` caps the allocation.

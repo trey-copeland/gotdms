@@ -130,6 +130,11 @@ func TestEmptySliceIsTyped(t *testing.T) {
 	if !ok || len(ss) != 0 {
 		t.Fatalf("string Slice = %#v", got)
 	}
+	// Strings return from readRangeFrom before readTyped, so the
+	// total-start check there is the one that rejects this range.
+	if _, err := sc.Slice(1, 2); !errors.Is(err, ErrArgument) {
+		t.Fatalf("string one past: %v", err)
+	}
 }
 
 func TestDAQmxSliceOnePast(t *testing.T) {
@@ -221,9 +226,16 @@ func TestPropertyWidthLimits(t *testing.T) {
 	if err := g.SetProperty("u32", uint32(math.MaxUint32)); err != nil {
 		t.Fatal(err)
 	}
+	if err := g.SetProperty("uhi", uint(math.MaxUint32)); err != nil {
+		t.Fatal(err)
+	}
 	if strconv.IntSize == 64 {
 		hi := int(math.MaxInt32)
 		if err := g.SetProperty("wide", hi+1); err != nil {
+			t.Fatal(err)
+		}
+		u := uint(math.MaxUint32)
+		if err := g.SetProperty("uwide", u+1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -243,8 +255,10 @@ func TestPropertyWidthLimits(t *testing.T) {
 	check("i32lo", int32(math.MinInt32))
 	check("i32hi", int32(math.MaxInt32))
 	check("u32", uint32(math.MaxUint32))
+	check("uhi", uint32(math.MaxUint32))
 	if strconv.IntSize == 64 {
 		check("wide", int64(math.MaxInt32)+1)
+		check("uwide", uint64(math.MaxUint32)+1)
 	}
 }
 
