@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,7 +113,7 @@ func TestInterleavedStringsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := w.Close()
-	if !errors.Is(err, ErrLayout) {
+	if !errors.Is(err, ErrLayout) || !strings.Contains(err.Error(), "cannot be multiplexed") {
 		t.Fatalf("got %v", err)
 	}
 }
