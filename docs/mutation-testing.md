@@ -27,6 +27,7 @@ gremlins unleash \
   --exclude-files '^dataset/' \
   --exclude-files '^cmd/' \
   --exclude-files '^examples/' \
+  --exclude-files '^testdata/' \
   --workers 4 \
   --timeout-coefficient 4 \
   --threshold-efficacy 0 \
@@ -35,23 +36,26 @@ gremlins unleash \
   --output-statuses lct
 ```
 
-`dataset/`, `cmd/`, and `examples/` are other packages. The run covers the root package, and Gremlins also lists mutants in `testdata/nptdms/roundtrip.go`, the differential harness's `package main`: the command does not exclude `testdata/`, and `go test` never runs that file, so every one of its mutants is `NOT COVERED`. `--timeout-coefficient 4` sets each mutant's test timeout to four times the coverage run, so a mutant that hangs is stopped and reported as `TIMED OUT`. `--output-statuses lct` prints lived, not-covered, and timed-out mutants. The JSON file has every mutant. `gremlins-report.json` is gitignored.
+`dataset/`, `cmd/`, and `examples/` are other packages. `testdata/` is the npTDMS harness (`package main`); `go test` never runs it, so every mutant there is `NOT COVERED`. The core job excludes it, the same way the dataset job does. `--timeout-coefficient 4` sets each mutant's test timeout to four times the coverage run, so a mutant that hangs is stopped and reported as `TIMED OUT`. `--output-statuses lct` prints lived, not-covered, and timed-out mutants. The JSON file has every mutant. `gremlins-report.json` is gitignored.
 
 `--threshold-efficacy 0` and `--threshold-mcover 0` are the defaults. Gremlins then does not exit 10 or 11 for a low score. A crash, or a coverage run that cannot execute the tests, still exits non-zero.
 
 Do not pass `--test-cpu`. Gremlins v0.6.0 hands it to the test binary as the single argument `-cpu N`, which the binary rejects (`flag provided but not defined: -cpu 1`). Every mutant then exits 1 and is reported `KILLED`, whatever it changed. Every figure this page published before the 32-bit build fix was measured that way, so their 100% efficacy and zero lived mutants did not reflect the tests. Those figures are withdrawn.
 
-With the flag removed, Gremlins v0.6.0 was run on eight core files only (`convert.go`, `daqmx.go`, `multiread.go`, `reader.go`, `segindex.go`, `spanrun.go`, `value.go`, `waveform.go`; every other root file excluded) on an 8 vCPU VM (linux/amd64, Go 1.27.3) on 2026-11-04, with the 32-bit build fix applied to `27f7f69`. It took about 23 minutes and found real survivors:
+The checks that only bind on a 32-bit build compare against the package variable `maxInt` (`intlimit.go`), and `intlimit_test.go` lowers it so an amd64 run tests each one at its boundary. Their mutants are killed.
+
+The first nightly without `--test-cpu` is run [41979231407](https://github.com/trey-copeland/gotdms/actions/runs/41979231407) on `d648108` (v0.3.0). The core job finished in 1h47m:
 
 | | |
 | --- | --- |
-| Killed | 1353 |
-| Lived | 380 |
-| Not covered | 97 |
-| Timed out | 8 |
-| Test efficacy | 78.07% |
+| Killed | 2024 |
+| Lived | 620 |
+| Not covered | 198 |
+| Timed out | 17 |
+| Test efficacy | 76.55% |
+| Mutator coverage | 93.03% |
 
-The lived mutants predate the 32-bit change and have not been triaged. The checks that only bind on a 32-bit build compare against the package variable `maxInt` (`intlimit.go`), and `intlimit_test.go` lowers it so an amd64 run tests each one at its boundary. Their mutants are killed. Whole-package figures will be filled in from the first nightly run without the flag.
+47 of the 198 not-covered rows are in `testdata/nptdms/roundtrip.go`. The core job now excludes `testdata/`, so the next run will not list them. The dataset job in that nightly was cancelled by a runner shutdown after about 2.5 minutes, before it wrote a report. A local dataset run of the same command is recorded under the triage below. `workflow_dispatch` from this environment was rejected (HTTP 403).
 
 ### The dataset package
 
@@ -72,6 +76,17 @@ gremlins unleash \
 ```
 
 `'^[^/]+\.go$'` excludes every file in the module root, which is the core package. Its earlier figures (550 killed, 0 lived) were measured with `--test-cpu 1` and are withdrawn for the reason above.
+
+A local run of this command on 2026-11-05 (4 workers, linux/amd64, Go 1.22) finished in 4m56s:
+
+| | |
+| --- | --- |
+| Killed | 395 |
+| Lived | 145 |
+| Not covered | 13 |
+| Timed out | 10 |
+| Test efficacy | 73.15% |
+| Mutator coverage | 97.65% |
 
 ## How to read the report
 
@@ -95,6 +110,50 @@ Triage each one:
 2. An equivalent mutant: no test can kill it, because the mutated program does the same thing. Leave the code, and write down the one-line reason.
 3. Dead or wrong code: change the library only when the change is clearly a bug, and add a regression test.
 
-Stop when what remains is equivalent, or the next test would only pin a change nothing can observe. Do not chase a mutant-coverage number. Of the 187 not-covered mutants in the run above, 47 are in `testdata/nptdms/roundtrip.go` (see above). The other 140 are spread over `value.go` (23), `waveform.go` (22), `reader.go` (19), `timestamp.go` (14), `fastwrite.go` (14), `multiread.go` (10), and a few other files: mostly per-type scalar decode and encode loops that the bulk path bypasses on a little-endian host (including the big-endian stores in `fastwrite.go`), range checks in property conversion, and defensive branches the suite does not enter.
+Stop when what remains is equivalent, or the next test would only pin a change nothing can observe. Do not chase a mutant-coverage number.
 
-The nightly job uploads `gremlins-report.json` as the `gremlins-report` artifact, including when the step fails. The job limit is 90 minutes (`timeout-minutes: 90`). The measured run above took 26 minutes with four workers on an 8 vCPU VM; a GitHub-hosted runner may be slower, so the limit leaves room. If a later run starts printing `TIMED OUT` for mutants that are not hangs, raise `--timeout-coefficient` rather than treating those rows as gaps. If the root package grows past the job limit, narrow `--exclude-files` or split the run by file and say which files ran.
+## Triage of run 41979231407
+
+No production bug turned up. The survivors are missing assertions, equivalent edits, or branches a test cannot reach. `CONDITIONALS_BOUNDARY` is 322 of the 620 core rows. Many of those in `reader.go`, `fastread.go`, and `segindex.go` are off-by-ones, but not because the suite forgot an easy edge. Checked one by one:
+
+- `CursorAt`'s `i < 0`, `n < 0`, and `i > total` were real gaps. `i == 0`, `n == 0`, and `i == total` with an empty tail never went through `CursorAt`. `edges_test.go` covers them, and the one-past range that distinguishes `total-i` from `total+i`.
+- `cur.pos+n > lim` is not a gap. When the two sides are equal the next statement sets `n` to `lim-pos`, which is already `n`.
+- `addSigned` (`timestamp.go`) has four boundary survivors. Equality means the addend was 0, and the other half of the overflow test is then false. No input tells them apart.
+- `nsToFraction`'s `r >= 500_000_000` never sees a remainder of exactly 500_000_000 for any nanosecond in `0..999_999_999`. The boundary edit is equivalent. `q++` is not: `Time()` still matches a fraction two units away, and the documented value is the nearest `2^-64` second. The test pins one nanosecond.
+- `seqReader`'s cache window (`off >= base` and the end `<=`) does change bytes when the underlying `ReaderAt` would return something else on a second read. That is tested. `n >= len(p)` does not matter to callers: `readFull` ignores the error once `n` fills the slice, and `io.ReaderAt` allows either `nil` or `EOF` in that case.
+- `fitsSpan` and `wordAligned` failing closed take the byte copy. The samples match. A test would only be asserting which path ran.
+- Chunk min/max updating on `x < min` is a no-op when `x == min`.
+
+`INVERT_NEGATIVES` and `ARITHMETIC_BASE` both replace the `-` token with `+`. All 31 core `INVERT_NEGATIVES` rows are that same edit at the same column as an arithmetic row. They are one behavior counted twice.
+
+| Category | Rows | What happened |
+| --- | --- | --- |
+| Killed by tests in this change | 28 | `edges_test.go`, the multiplexed-string error text, and `dataset` is separate below |
+| Duplicate `-` to `+` left in place | 27 | The same edit as an `ARITHMETIC_BASE` row this change did not kill. 4 of the 31 duplicates are in the 28 above |
+| Equivalent for every input | 9 | `addSigned` (4), the impossible half-nanosecond remainder (1), min/max equality (2), the cursor batch shrink (1), `seqReader`'s full-slice error (1) |
+| Left | 556 | Integer extremes, I/O failures, or a second check / slow path that still returns the same result |
+
+79 of the 556 sit on a line that compares against an integer extreme (`math.MaxInt`, `MaxUint32`, `maxInt`, and the same family). `intlimit_test.go` already kills the checks that go through the `maxInt` variable. The survivors use the constant, so the equal value is not reachable from an amd64 test without another harness. A few of those lines also have a `<= 0` guard beside the extreme; that guard fails closed into the same error or the slow path.
+
+24 of the 556 negate `err == nil` or `err != nil` on rename, stat, write, or a read that a later check still fails. Those two groups overlap (a line can mention both an extreme and an error), so they are not a partition of the 556.
+
+Files the new tests touch: `reader.go` (`CursorAt`, `Close`, empty `Slice`, `DAQmxSlice` via `readTyped`), `fastread.go` (the sequential buffer), `stream.go` (one past the values still declared), `writer.go` (int32 property bounds, and the multiplexed-string error), `value.go` (encoding `int32` / `uint32` at the type's own limits), `errors.go` (the `Error` text), `timestamp.go`.
+
+Deliberately left, with the reason:
+
+- `readRangeFrom`'s `total-start` subtraction. `readTyped` repeats the same check for every `Slice`. `DAQmxSlice` calls only `readTyped`, and that one is now tested. The copy in `readRangeFrom` cannot change a result.
+- `normalizeLayout` on one string channel. Returning "interleaved" or not builds the same column offsets, and `rawByteSize` still rejects several string channels. The test now requires the "cannot be multiplexed" text, which is the check that actually explains the error. The layout flags that do not change that text are still unasserted.
+- `applyInPlace` skipping `y = y*1 + 0`. The values match, including every test, except that a negative zero becomes `+0` if the loop runs. Signed zero is not part of the waveform contract.
+- Deinterleave word loads, `contiguousBytes`, and `directRead`'s size cutoff. Each one selects a faster path. The byte path and the buffered path return the same values.
+- Segment-index `count`'s element size (`4+4+4+4+4+1+1` and the division). A smaller minimum still fails when the following field reads run out of bytes, and `ns > 4096` caps the allocation.
+
+The dataset run's 145 lived rows are the same kinds of edit. Eight are killed by `dataset/workers_test.go`: `WithWorkers` / `WithReadWorkers` of `0` and of a positive count, the `GOMAXPROCS` cap, and the clamp inside `OpenFiles`. Four siblings are equivalent: `n > 8` versus `n >= 8` assigns 8 either way, `n < 1` versus `n <= 1` assigns 1 either way, and both `workers < 1` clamps do the same at 1.
+
+Still open on `dataset`, not in this change:
+
+- `clipFloat` / `clipTime` (`read.go`) when the window ends exactly on `len(src)`, and the alias return for a full unshared slice. Windows in the suite do not separate those from the copy path.
+- Catalog sort (`dataset.go` around the occurrence order). Inside `File != File` the `<` / `<=` edit cannot see equal keys. Negating `<` reverses the order, and no test asserts catalog order separate from time order.
+- Resample interpolation (`read.go`, the `Y[i-1] + frac*(Y[i]-Y[i-1])` terms) and `spanNumeric`'s `head[1] - head[0]`. The times the suite reads back still match.
+- `run`'s worker clamp. Forcing one goroutine still calls every index. A test would be counting goroutines.
+
+The nightly job uploads `gremlins-report.json` as the `gremlins-report` artifact, including when the step fails. The core job limit is 180 minutes. The run above took 1h47m on a GitHub-hosted runner. If a later run starts printing `TIMED OUT` for mutants that are not hangs, raise `--timeout-coefficient` rather than treating those rows as gaps. If the root package grows past the job limit, narrow `--exclude-files` or split the run by file and say which files ran.

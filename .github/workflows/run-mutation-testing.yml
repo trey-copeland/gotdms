@@ -78,12 +78,14 @@ jobs:
         # still fails this step. continue-on-error is not set, because
         # that would also hide those failures.
         # dataset/, cmd/, and examples/ are other packages. dataset/ has
-        # its own job below.
+        # its own job below. testdata/ is the npTDMS harness (package main);
+        # go test never runs it, so every mutant there is NOT COVERED.
         run: |
           gremlins unleash \
             --exclude-files '^dataset/' \
             --exclude-files '^cmd/' \
             --exclude-files '^examples/' \
+            --exclude-files '^testdata/' \
             --workers 4 \
             --timeout-coefficient 4 \
             --threshold-efficacy 0 \
