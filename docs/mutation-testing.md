@@ -55,7 +55,7 @@ The first nightly without `--test-cpu` is run [41979231407](https://github.com/t
 | Test efficacy | 76.55% |
 | Mutator coverage | 93.03% |
 
-47 of the 198 not-covered rows are in `testdata/nptdms/roundtrip.go`. The core job now excludes `testdata/`, so the next run will not list them. The dataset job in that nightly, and the one on `edeecbc` the next night, were stopped by the hosted runner. Neither produced a report artifact. Details are under [Dataset runner shutdown](#dataset-runner-shutdown).
+47 of the 198 not-covered rows are in `testdata/nptdms/roundtrip.go`. The core job now excludes `testdata/`, so the next run will not list them. The dataset job in that nightly, and the one on `edeecbc` the next night, logged a hosted-runner shutdown signal and did not finish. Neither produced a report artifact. Details are under [Dataset runner shutdown](#dataset-runner-shutdown).
 
 ### The dataset package
 
@@ -109,9 +109,9 @@ The first two dataset jobs that ran without `--test-cpu` did not finish. Neither
 | Last dataset progress | still in `dataset.go` | into `read.go`, mutants still printing |
 | Upload step | skipped | skipped |
 
-Both logs then say Gremlins is shutting down gracefully, the runner has received a shutdown signal, and Go 1.25.4 panics in `os/signal` (`send on closed channel`, `signal.go:246`). The panic is the runtime delivering a signal onto a channel that shutdown already closed. It is not a mutant result. Gremlins writes `gremlins-report-dataset.json` only from `report.Do`, after a clean finish, and `if: always()` on the upload step does not run once the runner process is exiting.
+Both logs then say Gremlins is shutting down gracefully, the hosted runner has received a shutdown signal, and Go 1.25.4 panics in `os/signal` (`send on closed channel`, `signal.go:246`). That panic is part of teardown. It is not a mutant result. Gremlins writes `gremlins-report-dataset.json` only from `report.Do`, after a clean finish. The upload step, which has `if: always()`, was skipped both times, so there is no artifact.
 
-The signal is the Actions service stopping that hosted runner. The logs do not say why. It is not this workflow's timeout, not a hang (output was still moving), and not an out-of-memory kill (there is no killer message, and the process was still reporting mutants). The two dataset runners differ in name, region, and image, and the core runner beside each of them stayed up for the whole core job. Two nights is not enough to say the dataset job causes the stop. There is no retry step: a second attempt would be a guess, and it would not explain the signal.
+The logs show that the hosted runner received a shutdown signal. They do not establish why. The configured 30-minute job timeout had not been reached. Mutants were still being printed. No out-of-memory evidence appears in the logs. The two dataset runners differ in name, region, and image, and the core runner beside each of them stayed up for the whole core job. Two nights is not enough to say the dataset job causes the stop. There is no retry step: a second attempt would be a guess, and it would not explain the signal.
 
 ## How to read the report
 
