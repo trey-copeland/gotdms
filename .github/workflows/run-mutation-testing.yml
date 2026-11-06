@@ -103,8 +103,13 @@ jobs:
   mutation-dataset:
     name: gremlins (dataset package)
     runs-on: ubuntu-latest
-    # The dataset package is about 550 mutants; a local run on 8 vCPUs
-    # took under a minute, so 30 minutes leaves a wide margin.
+    # 30 minutes did not fire on the two real (no --test-cpu) nights.
+    # 2026-11-05 job 127085201122 was stopped after 2m22s of this step.
+    # 2026-11-06 job 127746242634 was stopped after 4m58s. Both were still
+    # printing mutants. The log says the runner received a shutdown signal;
+    # the sibling core job, on another runner, finished both nights (107m
+    # and 70m). A 4-vCPU local run of edeecbc took 4m19s. Raising this
+    # limit does not address those stops. See docs/mutation-testing.md.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -141,10 +146,16 @@ jobs:
         # single argument "-cpu N", which the binary rejects as an undefined
         # flag. Every mutant then exits 1 and is reported KILLED, whatever it
         # changed, so the run always showed 0 lived.
-        # Same flags as the core job. Only dataset/ is mutated: the root
-        # package files ('^[^/]+\.go$'), cmd/, examples/, and testdata/ are
-        # excluded. The dataset tests kill its mutants.
+        # Same flags as the core job, plus k in --output-statuses.
+        # Only dataset/ is mutated: the root package files ('^[^/]+\.go$'),
+        # cmd/, examples/, and testdata/ are excluded.
+        # The JSON report is written only after a clean finish. A hosted
+        # runner shutdown skips the upload step below even with if: always(),
+        # so the step log is the only record. k puts every killed mutant in
+        # that log as it happens. Do not pass --test-cpu.
         run: |
+          set -euo pipefail
+          echo "dataset-mutation host nproc=$(nproc) mem_available_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
           gremlins unleash \
             --exclude-files '^[^/]+\.go$' \
             --exclude-files '^cmd/' \
@@ -155,7 +166,10 @@ jobs:
             --threshold-efficacy 0 \
             --threshold-mcover 0 \
             --output gremlins-report-dataset.json \
-            --output-statuses lct
+            --output-statuses lctk
+      # if: always() runs after a Gremlins failure. It does not run when the
+      # runner itself is shutting down: both 2026-11-05 and 2026-11-06 skipped
+      # this step, and neither run has a gremlins-report-dataset artifact.
       - name: Upload Gremlins report
         if: always()
         uses: actions/upload-artifact@v4

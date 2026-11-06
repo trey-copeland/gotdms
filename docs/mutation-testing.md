@@ -55,7 +55,7 @@ The first nightly without `--test-cpu` is run [41979231407](https://github.com/t
 | Test efficacy | 76.55% |
 | Mutator coverage | 93.03% |
 
-47 of the 198 not-covered rows are in `testdata/nptdms/roundtrip.go`. The core job now excludes `testdata/`, so the next run will not list them. The dataset job in that nightly was cancelled by a runner shutdown after about 2.5 minutes, before it wrote a report. A local dataset run of the same command is recorded under the triage below. `workflow_dispatch` from this environment was rejected (HTTP 403).
+47 of the 198 not-covered rows are in `testdata/nptdms/roundtrip.go`. The core job now excludes `testdata/`, so the next run will not list them. The dataset job in that nightly, and the one on `edeecbc` the next night, were stopped by the hosted runner. Neither produced a report artifact. Details are under [Dataset runner shutdown](#dataset-runner-shutdown).
 
 ### The dataset package
 
@@ -77,16 +77,41 @@ gremlins unleash \
 
 `'^[^/]+\.go$'` excludes every file in the module root, which is the core package. Its earlier figures (550 killed, 0 lived) were measured with `--test-cpu 1` and are withdrawn for the reason above.
 
-A local run of this command on 2026-11-05 (4 workers, linux/amd64, Go 1.22) finished in 4m56s:
+A local run of this command on 2026-11-05, before the worker-option tests, finished in 4m56s on 4 vCPUs (linux/amd64, Go 1.22): 395 killed, 145 lived, 13 not covered, 10 timed out, efficacy 73.15%, mutant coverage 97.65%.
+
+The same command on `edeecbc` (those tests included) finished in 4m19s on the same kind of machine:
 
 | | |
 | --- | --- |
-| Killed | 395 |
-| Lived | 145 |
+| Killed | 403 |
+| Lived | 137 |
 | Not covered | 13 |
 | Timed out | 10 |
-| Test efficacy | 73.15% |
+| Test efficacy | 74.63% |
 | Mutator coverage | 97.65% |
+
+The eight mutants that moved from lived to killed are the ones `dataset/workers_test.go` was written for: both edits of `WithWorkers` and `WithReadWorkers` (`n > 0`), and the negations of the `GOMAXPROCS` cap and of the two clamps in `OpenFiles`. The four boundary edits that assign the boundary value to itself (`n > 8`, `n < 1`, and both `workers < 1` clamps) still lived. Nothing else changed. The 2026-11-06 dataset log, which got past those lines before the runner stopped, shows the same split: those eight are absent, and the four equivalent boundaries are `LIVED`.
+
+The workflow's dataset step also passes `k` to `--output-statuses`, and prints `nproc` and `MemAvailable` before Gremlins starts. The command above does not. `k` only adds killed mutants to the log.
+
+### Dataset runner shutdown
+
+The first two dataset jobs that ran without `--test-cpu` did not finish. Neither has a `gremlins-report-dataset` artifact.
+
+| | [41979231407](https://github.com/trey-copeland/gotdms/actions/runs/41979231407) | [42173407387](https://github.com/trey-copeland/gotdms/actions/runs/42173407387) |
+| --- | --- | --- |
+| Commit | `d648108` | `edeecbc` |
+| Dataset job | [127085201122](https://github.com/trey-copeland/gotdms/actions/runs/41979231407/job/127085201122) | [127746242634](https://github.com/trey-copeland/gotdms/actions/runs/42173407387/job/127746242634) |
+| Unleash step | 06:16:00Z to 06:18:22Z (2m22s) | 06:16:53Z to 06:21:51Z (4m58s) |
+| Job timeout | 30 minutes, not reached | 30 minutes, not reached |
+| Runner | GitHub Actions 1000000828, westus, image `ubuntu-24.04` `20261025.353` | GitHub Actions 1000000848, westus3, image `ubuntu-24.04` `20261101.360` |
+| Core job on the other runner | success, about 107 minutes | success, 69m13s (2062 killed, 586 lived, 147 not covered, 17 timed out) |
+| Last dataset progress | still in `dataset.go` | into `read.go`, mutants still printing |
+| Upload step | skipped | skipped |
+
+Both logs then say Gremlins is shutting down gracefully, the runner has received a shutdown signal, and Go 1.25.4 panics in `os/signal` (`send on closed channel`, `signal.go:246`). The panic is the runtime delivering a signal onto a channel that shutdown already closed. It is not a mutant result. Gremlins writes `gremlins-report-dataset.json` only from `report.Do`, after a clean finish, and `if: always()` on the upload step does not run once the runner process is exiting.
+
+The signal is the Actions service stopping that hosted runner. The logs do not say why. It is not this workflow's timeout, not a hang (output was still moving), and not an out-of-memory kill (there is no killer message, and the process was still reporting mutants). The two dataset runners differ in name, region, and image, and the core runner beside each of them stayed up for the whole core job. Two nights is not enough to say the dataset job causes the stop. There is no retry step: a second attempt would be a guess, and it would not explain the signal.
 
 ## How to read the report
 
