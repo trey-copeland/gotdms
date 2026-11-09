@@ -11,6 +11,11 @@ on:
     # 06:00 UTC every day.
     - cron: '0 6 * * *'
   workflow_dispatch:
+  # Temporary: run the dataset job from this branch so a hosted sampler
+  # can be collected. Removed before the pull request is opened.
+  push:
+    branches:
+      - cursor/dataset-oom-sampler-7442
 
 permissions:
   contents: read
@@ -23,6 +28,8 @@ concurrency:
 jobs:
   mutation:
     name: gremlins (core package)
+    # A push of the sampler branch runs only the dataset job.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     # 45 minutes was too short once daqmx.go landed: run 3 was cancelled
     # at the limit in writer.go. The .gtdx sidecar code adds more mutants.
@@ -156,6 +163,38 @@ jobs:
         run: |
           set -euo pipefail
           echo "dataset-mutation host nproc=$(nproc) mem_available_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)"
+          sampler_log="${GITHUB_WORKSPACE}/dataset-sampler.log"
+          : > "${sampler_log}"
+          (
+            set +e
+            while true; do
+              {
+                echo "=== $(date -u +%Y-%m-%dT%H:%M:%S) ==="
+                awk '/^Mem(Total|Free|Available):/ {print}' /proc/meminfo
+                cg=$(awk -F: '$1=="0" {print $3; exit}' /proc/self/cgroup)
+                dir="/sys/fs/cgroup${cg}"
+                if [ ! -d "${dir}" ]; then dir=/sys/fs/cgroup; fi
+                echo "cgroup_dir ${dir}"
+                for f in memory.current memory.max memory.high memory.events memory.swap.current; do
+                  if [ -r "${dir}/${f}" ]; then
+                    echo "cgroup ${f}: $(tr '\n' ';' < "${dir}/${f}")"
+                  fi
+                done
+                echo "df_root $(df -B1 --output=avail,size,pcent,iavail,itotal / | tail -1 | tr -s ' ')"
+                tmp="${TMPDIR:-/tmp}"
+                echo "df_tmp ${tmp} $(df -B1 --output=avail,size,pcent,iavail,itotal "${tmp}" | tail -1 | tr -s ' ')"
+                cache=$(go env GOCACHE 2>/dev/null || true)
+                if [ -n "${cache}" ] && [ -d "${cache}" ]; then
+                  echo "df_gocache ${cache} $(df -B1 --output=avail,size,pcent,iavail,itotal "${cache}" | tail -1 | tr -s ' ')"
+                fi
+                echo "procs $(ps -e --no-headers | wc -l)"
+                ps -eo rss=,pid=,comm= --sort=-rss | head -5 | awk '{printf "top_rss_kb %s pid %s %s\n", $1, $2, $3}'
+              } | tee -a "${sampler_log}"
+              sleep 3
+            done
+          ) &
+          sampler_pid=$!
+          set +e
           gremlins unleash \
             --exclude-files '^[^/]+\.go$' \
             --exclude-files '^cmd/' \
@@ -167,9 +206,28 @@ jobs:
             --threshold-mcover 0 \
             --output gremlins-report-dataset.json \
             --output-statuses lctk
+          status=$?
+          kill "${sampler_pid}" 2>/dev/null || true
+          wait "${sampler_pid}" 2>/dev/null || true
+          exit "${status}"
+      - name: Kernel memory notes
+        if: always()
+        run: |
+          set +e
+          echo "=== dmesg oom ==="
+          dmesg -T 2>/dev/null | grep -i -E 'oom|out of memory|killed process' || echo "dmesg unavailable or no oom lines"
+          echo "=== journal oom ==="
+          journalctl -k -n 200 --no-pager 2>/dev/null | grep -i -E 'oom|out of memory|killed process' || echo "journal unavailable or no oom lines"
       # if: always() runs after a Gremlins failure. It does not run when the
       # runner itself is shutting down: both 2026-11-05 and 2026-11-06 skipped
       # this step, and neither run has a gremlins-report-dataset artifact.
+      - name: Upload sampler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataset-sampler
+          path: dataset-sampler.log
+          if-no-files-found: warn
       - name: Upload Gremlins report
         if: always()
         uses: actions/upload-artifact@v4
