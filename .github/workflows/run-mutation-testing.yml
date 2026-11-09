@@ -168,8 +168,8 @@ jobs:
             --output gremlins-report-dataset.json \
             --output-statuses lctk
       # if: always() runs after a Gremlins failure. It does not run when the
-      # runner itself is shutting down: both 2026-11-05 and 2026-11-06 skipped
-      # this step, and neither run has a gremlins-report-dataset artifact.
+      # runner itself is shutting down. The worker loop in dataset.run used
+      # to be the step that filled the machine: see docs/mutation-testing.md.
       - name: Upload Gremlins report
         if: always()
         uses: actions/upload-artifact@v4
