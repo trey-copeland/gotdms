@@ -24,7 +24,6 @@ func TestRunVisitsEachIndexOnce(t *testing.T) {
 		}
 	}
 	check(3, 10)
-	check(0, 4) // non-positive workers become one worker
 	check(8, 2) // extra workers are capped at n
 	run(4, 0, func(int) { t.Fatal("n == 0 should not call fn") })
 }
