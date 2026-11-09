@@ -3,8 +3,31 @@ package dataset
 import (
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
+
+func TestRunVisitsEachIndexOnce(t *testing.T) {
+	var mu sync.Mutex
+	check := func(workers, n int) {
+		t.Helper()
+		got := make([]int, n)
+		run(workers, n, func(i int) {
+			mu.Lock()
+			got[i]++
+			mu.Unlock()
+		})
+		for i, c := range got {
+			if c != 1 {
+				t.Fatalf("workers %d n %d index %d count %d", workers, n, i, c)
+			}
+		}
+	}
+	check(3, 10)
+	check(0, 4) // non-positive workers become one worker
+	check(8, 2) // extra workers are capped at n
+	run(4, 0, func(int) { t.Fatal("n == 0 should not call fn") })
+}
 
 func TestWorkerDefaultsAndNonPositive(t *testing.T) {
 	prev := runtime.GOMAXPROCS(4)

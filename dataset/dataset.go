@@ -941,8 +941,15 @@ func run(workers, n int, fn func(i int)) {
 	}
 	var wg sync.WaitGroup
 	jobs := make(chan int)
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
+	// Exactly `workers` goroutines, and exactly the indexes 0..n-1.
+	// A counted loop (w++; i++) is mutated by Gremlins into w-- or i--.
+	// w-- never finishes the loop and starts a goroutine every iteration.
+	// On a 16 GiB hosted runner that dataset.test sits near 15 GiB until the
+	// per-mutant timeout. The scheduled dataset job has been stopped there,
+	// with the runner reporting a shutdown signal. range does not have a
+	// ++/-- for that mutator to flip.
+	wg.Add(workers)
+	for range workers {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
@@ -950,7 +957,7 @@ func run(workers, n int, fn func(i int)) {
 			}
 		}()
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		jobs <- i
 	}
 	close(jobs)
